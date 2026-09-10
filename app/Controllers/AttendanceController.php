@@ -612,7 +612,8 @@ private function formatAttendanceSeconds($seconds): string
                 $employee['schedule_time_in'] ?? null,
                 $employee['schedule_time_out'] ?? null,
                 $employee['rest_day'] ?? null,
-                !empty($record['holiday_name'])
+                !empty($record['holiday_name']),
+                (string) ($employee['department'] ?? '')
             );
 
             // Keep exact calculator values separately.
@@ -856,7 +857,8 @@ private function formatAttendanceSeconds($seconds): string
                 $employee['schedule_time_in'] ?? null,
                 $employee['schedule_time_out'] ?? null,
                 $employee['rest_day'] ?? null,
-                (($record['attendance_status'] ?? '') === 'Holiday')
+                (($record['attendance_status'] ?? '') === 'Holiday'),
+                (string) ($employee['department'] ?? '')
             );
 
             // Keep exact calculator values separately.
@@ -1684,10 +1686,9 @@ private function formatAttendanceSeconds($seconds): string
                 )
             );
 
-        // Only NGTeco attendance spreadsheet formats are allowed.
-        // XLS is intentionally NOT supported.
         $allowedExtensions = [
             'xlsx',
+            'xls',
             'csv'
         ];
 
@@ -1702,7 +1703,7 @@ private function formatAttendanceSeconds($seconds): string
             $_SESSION[
                 'attendance_upload_error'
             ] =
-                'Please upload an XLSX or CSV file only.';
+                'Please upload an XLSX, XLS, or CSV file.';
 
             header(
                 'Location: /attendance'

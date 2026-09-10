@@ -52,6 +52,7 @@ $router->get('/settings', [SettingsController::class, 'index']);
 $router->get('/settings/users/{id}/edit', [SettingsController::class, 'editUser']);
 $router->post('/settings/users/{id}', [SettingsController::class, 'updateUser']);
 $router->post('/settings/departments/{id}/overtime', [SettingsController::class, 'updateDepartmentOT']);
+$router->post('/settings/departments/overtime', [SettingsController::class, 'updateDepartmentsOT']);
 
 // Holidays (Admin only)
 $router->get('/settings/holidays', [SettingsController::class, 'holidays']);

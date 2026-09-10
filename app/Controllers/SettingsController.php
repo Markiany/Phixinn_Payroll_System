@@ -76,6 +76,40 @@ class SettingsController
     }
 
     /**
+     * Save all department Morning / Early OT permissions from the Settings dropdown.
+     */
+    public function updateDepartmentsOT(): void
+    {
+        Auth::requireRole('admin');
+
+        $allowedIds = $_POST['allowed_department_ids'] ?? [];
+        if (!is_array($allowedIds)) {
+            $allowedIds = [];
+        }
+
+        try {
+            $db = \App\Helpers\Database::connection();
+            DepartmentOTSettings::syncFromEmployees($db);
+            DepartmentOTSettings::updateBulk($allowedIds, $db);
+
+            \App\Helpers\AuditLogger::log(
+                'department.ot_settings.bulk_updated',
+                'department_ot_setting',
+                'all'
+            );
+
+            $_SESSION['settings_success'] =
+                'Morning Person OT settings updated successfully.';
+        } catch (\Throwable $e) {
+            $_SESSION['settings_error'] =
+                'Failed to update Morning Person OT settings: ' . $e->getMessage();
+        }
+
+        header('Location: /settings');
+        exit;
+    }
+
+    /**
      * Show the edit form for a single user account.
      */
     public function editUser(string $id): void

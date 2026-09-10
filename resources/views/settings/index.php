@@ -31,81 +31,125 @@
 <?php endif; ?>
 
 <div class="bg-white shadow-sm border border-slate-200 rounded-lg overflow-hidden mb-6">
-    <div class="px-5 py-4 border-b border-slate-200">
-        <h2 class="text-base font-semibold text-slate-800">Department Overtime Settings</h2>
-        <p class="text-xs text-slate-500 mt-1">
-            Control whether employees in each department can earn Early / Morning OT.
-        </p>
+    <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+        <div>
+            <h2 class="text-base font-semibold text-slate-800">Department Overtime Settings</h2>
+            <p class="text-xs text-slate-500 mt-1">
+                Select which departments are allowed to earn Early / Morning OT.
+            </p>
+        </div>
     </div>
 
-    <table class="w-full text-sm">
-        <thead class="bg-slate-50 text-slate-500 text-left">
-            <tr>
-                <th class="px-5 py-2 font-medium">Department Name</th>
-                <th class="px-5 py-2 font-medium">Department Code</th>
-                <th class="px-5 py-2 font-medium">Early / Morning OT</th>
-                <th class="px-5 py-2 font-medium text-right">Action</th>
-            </tr>
-        </thead>
-
-        <tbody class="divide-y divide-slate-100">
-            <?php foreach (($departments ?? []) as $dept): ?>
+    <form method="POST" action="/settings/departments/overtime">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-500 text-left">
                 <tr>
-                    <form method="POST" action="/settings/departments/<?= (int) $dept['id'] ?>/overtime">
+                    <th class="px-5 py-2 font-medium">Department Name</th>
+                    <th class="px-5 py-2 font-medium">Department Code</th>
+                    <th class="px-5 py-2 font-medium text-right">Morning Person OT</th>
+                </tr>
+            </thead>
+
+            <tbody class="divide-y divide-slate-100">
+                <?php
+                    $allowedMorningOT = array_values(array_filter(
+                        ($departments ?? []),
+                        static fn ($dept): bool => (int) ($dept['allow_early_ot'] ?? 0) === 1
+                    ));
+                ?>
+
+                <?php foreach (($departments ?? []) as $dept): ?>
+                    <tr>
                         <td class="px-5 py-3 font-medium text-slate-800">
                             <?= htmlspecialchars($dept['department_name']) ?>
-                            <input
-                                type="hidden"
-                                name="department_name"
-                                value="<?= htmlspecialchars($dept['department_name']) ?>"
-                            >
                         </td>
 
                         <td class="px-5 py-3 text-slate-600">
                             <?= htmlspecialchars($dept['department_code'] ?? '—') ?>
-                            <input
-                                type="hidden"
-                                name="department_code"
-                                value="<?= htmlspecialchars($dept['department_code'] ?? '') ?>"
-                            >
                         </td>
 
-                        <td class="px-5 py-3">
-                            <label class="inline-flex items-center gap-2 cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    name="allow_early_ot"
-                                    value="1"
-                                    class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                                    <?= (int) ($dept['allow_early_ot'] ?? 1) === 1 ? 'checked' : '' ?>
-                                >
-                                <span class="text-sm text-slate-700">
-                                    <?= (int) ($dept['allow_early_ot'] ?? 1) === 1 ? 'Allowed' : 'Not Allowed' ?>
-                                </span>
-                            </label>
-                        </td>
+                        <?php if ((int) ($dept['allow_early_ot'] ?? 0) === 1): ?>
+                            <td class="px-5 py-3 text-right text-green-700 font-medium">
+                                Allowed
+                            </td>
+                        <?php else: ?>
+                            <td class="px-5 py-3 text-right text-slate-500">
+                                Not Allowed
+                            </td>
+                        <?php endif; ?>
+                    </tr>
+                <?php endforeach; ?>
 
-                        <td class="px-5 py-3 text-right">
+                <?php if (empty($departments)): ?>
+                    <tr>
+                        <td colspan="3" class="px-5 py-6 text-center text-slate-400">
+                            No departments found from the Employees records.
+                        </td>
+                    </tr>
+                <?php endif; ?>
+            </tbody>
+        </table>
+
+        <?php if (!empty($departments)): ?>
+            <div class="px-5 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-3">
+                <details class="relative">
+                    <summary class="list-none cursor-pointer inline-flex items-center justify-between gap-3 min-w-[250px] px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50">
+                        <span>
+                            Morning Person OT
+                            <span class="text-xs text-slate-400 ml-1">
+                                (<?= count($allowedMorningOT) ?> allowed)
+                            </span>
+                        </span>
+                        <span class="text-slate-400">▼</span>
+                    </summary>
+
+                    <div class="absolute right-0 bottom-full mb-2 z-20 w-[360px] max-h-[420px] overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg p-4">
+                        <div class="mb-3">
+                            <div class="text-sm font-semibold text-slate-800">Morning Person OT</div>
+                            <div class="text-xs text-slate-500 mt-1">
+                                Check the departments that are allowed to receive Morning / Early OT.
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <?php foreach (($departments ?? []) as $dept): ?>
+                                <?php $deptId = (int) ($dept['id'] ?? 0); ?>
+                                <label class="flex items-center justify-between gap-3 px-3 py-2 rounded-md hover:bg-slate-50 cursor-pointer">
+                                    <span class="min-w-0">
+                                        <span class="block text-sm text-slate-700 truncate">
+                                            <?= htmlspecialchars($dept['department_name']) ?>
+                                        </span>
+                                        <?php if (!empty($dept['department_code'])): ?>
+                                            <span class="block text-xs text-slate-400">
+                                                <?= htmlspecialchars($dept['department_code']) ?>
+                                            </span>
+                                        <?php endif; ?>
+                                    </span>
+
+                                    <input
+                                        type="checkbox"
+                                        name="allowed_department_ids[]"
+                                        value="<?= $deptId ?>"
+                                        class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                        <?= (int) ($dept['allow_early_ot'] ?? 0) === 1 ? 'checked' : '' ?>
+                                    >
+                                </label>
+                            <?php endforeach; ?>
+                        </div>
+
+                        <div class="mt-4 pt-3 border-t border-slate-200 flex justify-end">
                             <button
                                 type="submit"
-                                class="text-sm text-slate-600 hover:underline"
+                                class="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-slate-800 rounded-md hover:bg-slate-700 transition"
                             >
                                 Save
                             </button>
-                        </td>
-                    </form>
-                </tr>
-            <?php endforeach; ?>
-
-            <?php if (empty($departments)): ?>
-                <tr>
-                    <td colspan="4" class="px-5 py-6 text-center text-slate-400">
-                        No departments found from the Employees records.
-                    </td>
-                </tr>
-            <?php endif; ?>
-        </tbody>
-    </table>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        <?php endif; ?>
+    </form>
 </div>
 
 <!-- Users table -->

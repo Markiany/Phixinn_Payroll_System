@@ -90,3 +90,24 @@ The importer supports numeric ID normalization such as `883` ↔ `0883` when the
 - Employee edit route/form corrected.
 - Existing payroll runs are retained.
 - Payroll download is repeatable.
+
+PHIXINN Payroll System - Morning Person OT Dropdown Update
+
+Replace ONLY these 4 files in your existing project:
+1. app/Controllers/SettingsController.php
+2. app/Services/DepartmentOTSettings.php
+3. resources/views/settings/index.php
+4. routes/web.php
+
+What changed:
+- Department list is synced dynamically from employee department values.
+- Morning Person OT is now one column/dropdown instead of one Save button per department.
+- The dropdown contains a checkbox for every synced department.
+- Checked = Allowed; unchecked = Not Allowed.
+- One Save button saves all department permissions at once.
+- Existing saved permissions are preserved.
+- New departments default to Not Allowed.
+- Unknown departments are Not Allowed until explicitly enabled.
+- Existing per-department route/method remains in place for compatibility.
+- No salary, attendance, late, holiday, rest-day, or other payroll logic is intentionally changed by this UI update.
+

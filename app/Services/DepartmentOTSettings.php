@@ -71,8 +71,9 @@ class DepartmentOTSettings
                 continue;
             }
 
-            // Packer is the only department disabled by default.
-            $allowEarlyOT = strcasecmp($department, 'Packer') !== 0;
+            // New departments are disabled by default. Existing saved settings
+            // are preserved by the ON DUPLICATE KEY UPDATE clause above.
+            $allowEarlyOT = false;
 
             $stmt->execute([
                 ':name' => $department,
@@ -104,7 +105,7 @@ class DepartmentOTSettings
         $department = trim($department);
 
         if ($department === '') {
-            return true;
+            return false;
         }
 
         $stmt = $db->prepare("
@@ -118,7 +119,7 @@ class DepartmentOTSettings
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$row) {
-            return strcasecmp($department, 'Packer') !== 0;
+            return false;
         }
 
         return (int) $row['allow_early_ot'] === 1;
@@ -153,4 +154,40 @@ class DepartmentOTSettings
             ':id' => $id,
         ]);
     }
+    /**
+     * Save Morning / Early OT permissions for all synced departments at once.
+     * Only department IDs that are present in the current settings table can be
+     * enabled. All other synced departments are explicitly disabled.
+     */
+    public static function updateBulk(array $allowedIds, ?PDO $db = null): void
+    {
+        $db = $db ?? Database::connection();
+        self::ensureTable($db);
+
+        $allowedIds = array_values(array_unique(array_filter(
+            array_map('intval', $allowedIds),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        $rows = self::all($db);
+
+        $stmt = $db->prepare("
+            UPDATE department_ot_settings
+            SET allow_early_ot = :allow, updated_at = NOW()
+            WHERE id = :id
+        ");
+
+        foreach ($rows as $row) {
+            $id = (int) ($row['id'] ?? 0);
+            if ($id <= 0) {
+                continue;
+            }
+
+            $stmt->execute([
+                ':allow' => in_array($id, $allowedIds, true) ? 1 : 0,
+                ':id' => $id,
+            ]);
+        }
+    }
+
 }
