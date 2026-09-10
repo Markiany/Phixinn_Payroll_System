@@ -967,12 +967,19 @@ $statusClass =
 
                                     <?php
 
+                                    $hasTimeOut =
+                                        trim((string) ($row['time_out'] ?? '')) !== '';
+
                                     $currentStatus =
-                                        !empty($row['holiday_name'])
-                                            ? 'Holiday'
+                                        !$hasTimeOut
+                                            ? ''
                                             : (
-                                                $row['attendance_status']
-                                                ?? 'Present'
+                                                !empty($row['holiday_name'])
+                                                    ? 'Holiday'
+                                                    : (
+                                                        $row['attendance_status']
+                                                        ?? 'Present'
+                                                    )
                                             );
 
                                     ?>
@@ -996,7 +1003,7 @@ $statusClass =
 
                                 <td>
 
-                                    <?php if (!empty($row['holiday_name'])): ?>
+                                    <?php if ($hasTimeOut && !empty($row['holiday_name'])): ?>
 
                                         <div class="font-medium">
                                             <?= htmlspecialchars($row['holiday_name']) ?>

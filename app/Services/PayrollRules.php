@@ -7,21 +7,37 @@ namespace App\Services;
  * ============================================================
  * ONE centralized place for every payroll constant: late /
  * undertime deduction brackets, overtime thresholds and
- * multipliers, and holiday pay multipliers per holiday type.
+ * multipliers, holiday pay multipliers, and allowance rules.
  *
  * Nothing else in the app should hardcode these numbers. If a
- * rate ever needs to change, it changes here once. Every
- * consumer (Salary Calculation page, Excel export, individual
- * payslip, Payslips ZIP) already goes through the single
- * calculation engine in SalaryCalculationController, so a
- * change here is picked up everywhere automatically - there is
- * no second copy of these numbers anywhere to fall out of sync.
+ * rate ever needs to change, it changes here once.
  * ============================================================
  */
 class PayrollRules
 {
     /** Standard working hours in a regular day. Hourly Rate = Daily Rate / this. */
     public const REGULAR_HOURS_PER_DAY = 8.0;
+
+    // ------------------------------------------------------------
+    // ALLOWANCE RULES
+    // ------------------------------------------------------------
+
+    /** Fixed weekly allowance amount for eligible employees. */
+    public const DEFAULT_WEEKLY_ALLOWANCE = 500.00;
+
+    /**
+     * Determine if employee qualifies for weekly allowance.
+     * Rule: Must have 0 late minutes, 0 undertime minutes, and 0 absent days.
+     * Even a single minute of late or undertime forfeits the entire allowance.
+     */
+    public static function calculateAllowance(float|int $lateMinutes, float|int $undertimeMinutes, float|int $absentDays, float $allowanceAmount = self::DEFAULT_WEEKLY_ALLOWANCE): float
+    {
+        if ($lateMinutes > 0 || $undertimeMinutes > 0 || $absentDays > 0) {
+            return 0.00;
+        }
+
+        return $allowanceAmount;
+    }
 
     // ------------------------------------------------------------
     // LATE / UNDERTIME
@@ -64,14 +80,6 @@ class PayrollRules
 
     // ------------------------------------------------------------
     // HOLIDAY BASE-DAY PAY
-    // ------------------------------------------------------------
-    // Multiplier applied to the employee's Daily Rate for the day,
-    // depending on the holiday's type and whether they worked it.
-    // Standard Philippine holiday-pay conventions:
-    //   Regular Holiday:              worked = 200%, unworked = 100% (if eligible)
-    //   Special Non-Working Holiday:  worked = 130%, unworked =   0% (no work, no pay)
-    // Adjust here if your company's policy differs - nothing else
-    // in the app needs to change.
     // ------------------------------------------------------------
     private const HOLIDAY_MULTIPLIERS = [
         'Regular Holiday' => [

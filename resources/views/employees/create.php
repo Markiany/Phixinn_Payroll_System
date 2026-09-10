@@ -104,12 +104,23 @@
                     <?= __('employees.field_department') ?>
                 </label>
 
-                <input
-                    type="text"
+                <select
                     name="department"
                     class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
-                    placeholder="<?= htmlspecialchars(__('employees.placeholder_department')) ?>"
                 >
+                    <option value="">Select Department</option>
+                    <option value="HR Manager">HR Manager</option>
+                    <option value="Secretary">Secretary</option>
+                    <option value="Utility">Utility</option>
+                    <option value="Warehouse Man">Warehouse Man</option>
+                    <option value="Belt">Belt</option>
+                    <option value="IT">IT</option>
+                    <option value="RTS">RTS</option>
+                    <option value="Stock">Stock</option>
+                    <option value="Packer">Packer</option>
+                    <option value="Picker">Picker</option>
+                    <option value="Phixinn">Phixinn</option>
+                </select>
             </div>
 
             <!-- Employment Type -->

@@ -4,6 +4,7 @@ namespace App\Controllers;
 
 use App\Helpers\Auth;
 use App\Models\User;
+use App\Services\DepartmentOTSettings;
 
 class SettingsController
 {
@@ -17,12 +18,61 @@ class SettingsController
         $user = Auth::user();
         $users = User::all();
 
+        DepartmentOTSettings::ensureTable();
+        $departments = DepartmentOTSettings::syncFromEmployees();
+
         $error = $_SESSION['settings_error'] ?? null;
         $success = $_SESSION['settings_success'] ?? null;
 
         unset($_SESSION['settings_error'], $_SESSION['settings_success']);
 
         require __DIR__ . '/../../resources/views/settings/index.php';
+    }
+
+    /**
+     * Update department overtime settings.
+     */
+    public function updateDepartmentOT(string $id): void
+    {
+        Auth::requireRole('admin');
+
+        $departmentId = (int) $id;
+        $name = trim((string) ($_POST['department_name'] ?? ''));
+        $code = trim((string) ($_POST['department_code'] ?? ''));
+        $allowEarlyOT = isset($_POST['allow_early_ot']);
+
+        if ($departmentId <= 0 || $name === '') {
+            $_SESSION['settings_error'] = 'Invalid department setting.';
+            header('Location: /settings');
+            exit;
+        }
+
+        try {
+            $db = \App\Helpers\Database::connection();
+
+            DepartmentOTSettings::update(
+                $departmentId,
+                $name,
+                $code !== '' ? $code : null,
+                $allowEarlyOT,
+                $db
+            );
+
+            \App\Helpers\AuditLogger::log(
+                'department.ot_setting.updated',
+                'department_ot_setting',
+                (string) $departmentId
+            );
+
+            $_SESSION['settings_success'] =
+                "Department '{$name}' overtime setting updated successfully.";
+        } catch (\Throwable $e) {
+            $_SESSION['settings_error'] =
+                'Failed to update department overtime setting: ' . $e->getMessage();
+        }
+
+        header('Location: /settings');
+        exit;
     }
 
     /**

@@ -77,12 +77,23 @@
 
             <div>
                 <label class="block text-sm font-medium text-slate-700 mb-1"><?= __('employees.field_department') ?></label>
-                <input
-                    type="text"
+                <select
                     name="department"
-                    value="<?= htmlspecialchars((string) ($employee['department'] ?? '')) ?>"
                     class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
                 >
+                    <option value="">Select Department</option>
+                    <option value="HR Manager" <?= ($employee['department'] ?? '') === 'HR Manager' ? 'selected' : '' ?>>HR Manager</option>
+                    <option value="Secretary" <?= ($employee['department'] ?? '') === 'Secretary' ? 'selected' : '' ?>>Secretary</option>
+                    <option value="Utility" <?= ($employee['department'] ?? '') === 'Utility' ? 'selected' : '' ?>>Utility</option>
+                    <option value="Warehouse Man" <?= ($employee['department'] ?? '') === 'Warehouse Man' ? 'selected' : '' ?>>Warehouse Man</option>
+                    <option value="Belt" <?= ($employee['department'] ?? '') === 'Belt' ? 'selected' : '' ?>>Belt</option>
+                    <option value="IT" <?= ($employee['department'] ?? '') === 'IT' ? 'selected' : '' ?>>IT</option>
+                    <option value="RTS" <?= ($employee['department'] ?? '') === 'RTS' ? 'selected' : '' ?>>RTS</option>
+                    <option value="Stock" <?= ($employee['department'] ?? '') === 'Stock' ? 'selected' : '' ?>>Stock</option>
+                    <option value="Packer" <?= ($employee['department'] ?? '') === 'Packer' ? 'selected' : '' ?>>Packer</option>
+                    <option value="Picker" <?= ($employee['department'] ?? '') === 'Picker' ? 'selected' : '' ?>>Picker</option>
+                    <option value="Phixinn" <?= ($employee['department'] ?? '') === 'Phixinn' ? 'selected' : '' ?>>Phixinn</option>
+                </select>
             </div>
 
             <div>

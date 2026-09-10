@@ -4,6 +4,7 @@ namespace App\Controllers;
 
 use App\Helpers\Auth;
 use App\Helpers\Database;
+use App\Services\AttendanceCalculator;
 use Exception;
 use PDO;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -81,7 +82,9 @@ class SalaryCalculationController
         $defaultFrom = $today->format('Y-m-d');
         $defaultTo = $today->format('Y-m-d');
 
-        $error = $_SESSION['salary_error'] ?? null;
+        // Salary errors are intentionally not displayed on the Salary Calculation page.
+        // Keep the session clean so an old transaction error cannot reappear after refresh.
+        $error = null;
         $success = $_SESSION['salary_success'] ?? null;
 
         unset(
@@ -336,12 +339,18 @@ class SalaryCalculationController
              LEFT JOIN holidays h
                 ON h.holiday_date = a.attendance_date
                AND h.is_active = 1
-             WHERE a.employee_id = :employee_id
+             WHERE (
+                    CAST(a.employee_id AS CHAR) = CAST(:employee_id AS CHAR)
+                    OR CAST(a.employee_id AS CHAR) = CAST(:employee_code AS CHAR)
+                    OR CAST(a.ngteco_user_id AS CHAR) = CAST(:ngteco_user_id AS CHAR)
+                )
                AND a.attendance_date BETWEEN :period_start AND :period_end
              ORDER BY a.attendance_date ASC"
         );
         $stmt->execute([
             'employee_id' => $employeeId,
+            'employee_code' => $line['employee_code'] ?? '',
+            'ngteco_user_id' => $line['ngteco_user_id'] ?? '',
             'period_start' => $run['period_start'],
             'period_end' => $run['period_end'],
         ]);
@@ -673,26 +682,68 @@ class SalaryCalculationController
          * ========================================================
          */
 
-        $filename =
-            'Payroll_'
-            . date(
-                'Ymd',
-                strtotime($run['period_start'])
-            )
-            . '_'
-            . date(
-                'Ymd',
-                strtotime($run['period_end'])
-            )
-            . (
-                $department !== ''
-                    ? '_' .
-                      $this->sanitizeFilename(
-                          $department
-                      )
-                    : ''
-            )
-            . '.xlsx';
+        /*
+         * ========================================================
+         * PAYROLL EXCEL FILENAME
+         * ========================================================
+         *
+         * Same month:
+         * Payroll Sept 30 - 5 2026.xlsx
+         *
+         * Different months:
+         * Payroll Aug 30, 2026 - Sep 5, 2026.xlsx
+         *
+         * The filename follows the actual payroll period.
+         */
+
+        $periodStartDate =
+            new \DateTime(
+                (string) $run['period_start']
+            );
+
+        $periodEndDate =
+            new \DateTime(
+                (string) $run['period_end']
+            );
+
+        if (
+            $periodStartDate->format('Y-m') !==
+            $periodEndDate->format('Y-m')
+        ) {
+            $filename =
+                'Payroll '
+                . $periodStartDate->format('M j, Y')
+                . ' - '
+                . $periodEndDate->format('M j, Y')
+                . (
+                    $department !== ''
+                        ? ' - ' .
+                          $this->sanitizeFilename(
+                              $department
+                          )
+                        : ''
+                )
+                . '.xlsx';
+        } else {
+            $filename =
+                'Payroll '
+                . $periodStartDate->format('M')
+                . ' '
+                . $periodStartDate->format('j')
+                . ' - '
+                . $periodEndDate->format('j')
+                . ' '
+                . $periodStartDate->format('Y')
+                . (
+                    $department !== ''
+                        ? ' - ' .
+                          $this->sanitizeFilename(
+                              $department
+                          )
+                        : ''
+                )
+                . '.xlsx';
+        }
 
         header(
             'Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -816,6 +867,19 @@ class SalaryCalculationController
      * payslip, but renders it as a PNG image. This keeps the existing
      * XLSX download untouched while providing a non-editable image
      * version for sharing/printing.
+     *
+     * Visual layout only was redesigned to follow the requested
+     * reference payslip format: bordered card, boxed pay-period /
+     * employee-code header, labeled info grid, a Salary Summary
+     * (days worked/absent/holiday - counted from existing attendance
+     * records, no new formulas), a Basic Salary section broken down
+     * by overtime type (Regular / Rest Day / Holiday - split using
+     * the SAME multiplier logic already in computeEmployeePay(), so
+     * the three amounts always add up to the existing overtime_pay
+     * total), a Gross Pay strip, a Deductions grid, and a prominent
+     * Net Pay bar. Every peso amount shown still comes straight from
+     * the existing $line array - nothing here changes how basic pay,
+     * overtime, deductions, gross pay, or net pay are calculated.
      */
     public function downloadPayslipImage(
         string $id,
@@ -858,8 +922,15 @@ class SalaryCalculationController
             return;
         }
 
+        $breakdown =
+            $this->getPayslipAttendanceBreakdown(
+                $db,
+                $run,
+                $line
+            );
+
         $width = 1400;
-        $height = 1650;
+        $height = 1260;
 
         $image =
             imagecreatetruecolor(
@@ -883,10 +954,11 @@ class SalaryCalculationController
         $black = imagecolorallocate($image, 15, 23, 42);
         $slate = imagecolorallocate($image, 71, 85, 105);
         $muted = imagecolorallocate($image, 100, 116, 139);
-        $border = imagecolorallocate($image, 226, 232, 240);
+        $border = imagecolorallocate($image, 148, 163, 184);
+        $lightBorder = imagecolorallocate($image, 226, 232, 240);
         $section = imagecolorallocate($image, 30, 41, 59);
-        $green = imagecolorallocate($image, 22, 101, 52);
-        $greenBg = imagecolorallocate($image, 220, 252, 231);
+        $lightBar = imagecolorallocate($image, 226, 229, 235);
+        $netBar = imagecolorallocate($image, 71, 78, 92);
         $red = imagecolorallocate($image, 185, 28, 28);
         $light = imagecolorallocate($image, 248, 250, 252);
 
@@ -897,47 +969,38 @@ class SalaryCalculationController
             $white
         );
 
-        $left = 80;
-        $right = $width - 80;
-        $contentWidth = $right - $left;
-        $rowHeight = 48;
+        $left = 60;
+        $right = $width - 60;
+        $top = 40;
+
         $labelX = $left + 24;
         $valueRight = $right - 24;
-        $valueX = $left + 610;
-        $y = 70;
+        $y = $top + 30;
+
+        /*
+         * ========================================================
+         * HEADER: company name / subtitle (left)
+         * Pay period + employee code box (right)
+         * ========================================================
+         */
 
         $this->drawPayslipImageText(
             $image,
-            $left,
+            $left + 20,
             $y,
             'PHIXINN PAYROLL SYSTEM',
             $black,
             5
         );
 
-        $y += 48;
-
         $this->drawPayslipImageText(
             $image,
-            $left,
-            $y,
+            $left + 20,
+            $y + 28,
             'Employee Payslip',
             $slate,
             4
         );
-
-        $y += 52;
-
-        imagerectangle(
-            $image,
-            $left,
-            $y,
-            $right,
-            $y + 2,
-            $border
-        );
-
-        $y += 36;
 
         $periodLabel =
             date(
@@ -954,86 +1017,284 @@ class SalaryCalculationController
                 )
             );
 
+        $this->drawPayslipImageTextRight(
+            $image,
+            $valueRight,
+            $y,
+            'Payslip for the period of',
+            $slate,
+            3
+        );
+
+        $this->drawPayslipImageTextRight(
+            $image,
+            $valueRight,
+            $y + 18,
+            $periodLabel,
+            $black,
+            4
+        );
+
         $employeeCode =
             $line['employee_code']
             ?? $line['ngteco_user_id']
             ?? '';
 
-        $infoRows = [
-            'Employee Name' =>
+        $codeBoxWidth = 260;
+        $codeBoxHeight = 34;
+        $codeBoxX = $right - $codeBoxWidth;
+        $codeBoxY = $y + 42;
+
+        imagerectangle(
+            $image,
+            $codeBoxX,
+            $codeBoxY,
+            $right,
+            $codeBoxY + $codeBoxHeight,
+            $border
+        );
+
+        $this->drawPayslipImageTextRight(
+            $image,
+            $right - 10,
+            $codeBoxY + 9,
+            (string) ($employeeCode ?: '-'),
+            $black,
+            4
+        );
+
+        $y += 78;
+
+        imagefilledrectangle(
+            $image,
+            $left,
+            $y,
+            $right,
+            $y + 2,
+            $border
+        );
+
+        $y += 30;
+
+        /*
+         * ========================================================
+         * EMPLOYEE INFO GRID (3 columns x 2 rows)
+         * ========================================================
+         */
+
+        $infoColWidth = (int) (($right - $left) / 3);
+
+        $infoGrid = [
+            [
+                'EMPLOYEE',
                 (string) ($line['employee_name'] ?? '-'),
-            'Employee Code' =>
-                (string) ($employeeCode ?: '-'),
-            'Department' =>
+                'DEPARTMENT',
                 (string) ($line['department'] ?: '-'),
-            'Position' =>
+                'EMPLOYEE CODE',
+                (string) ($employeeCode ?: '-'),
+            ],
+            [
+                'POSITION',
                 (string) ($line['position'] ?: '-'),
-            'Pay Period' =>
-                $periodLabel,
-            'Status' =>
+                'STATUS',
                 (string) ($line['status'] ?? '-'),
+                'PAY PERIOD',
+                $periodLabel,
+            ],
         ];
 
-        foreach ($infoRows as $label => $value) {
+        foreach ($infoGrid as $rowFields) {
 
-            $this->drawPayslipImageText(
-                $image,
-                $labelX,
-                $y,
-                $label . ':',
-                $black,
-                4
-            );
+            for ($col = 0; $col < 3; $col++) {
 
-            $this->drawPayslipImageTextRight(
-                $image,
-                $valueRight,
-                $y,
-                $value,
-                $slate,
-                4
-            );
+                $colX = $left + ($col * $infoColWidth);
+                $label = $rowFields[$col * 2];
+                $value = $rowFields[($col * 2) + 1];
 
-            $y += $rowHeight;
+                $this->drawPayslipImageText(
+                    $image,
+                    $colX,
+                    $y,
+                    $label,
+                    $muted,
+                    2
+                );
+
+                imagedashedline(
+                    $image,
+                    $colX,
+                    $y + 22,
+                    $colX + $infoColWidth - 24,
+                    $y + 22,
+                    $border
+                );
+
+                $this->drawPayslipImageText(
+                    $image,
+                    $colX,
+                    $y + 28,
+                    $value,
+                    $black,
+                    4
+                );
+            }
+
+            $y += 66;
         }
 
-        $y += 18;
+        $y += 10;
+
+        /*
+         * ========================================================
+         * SALARY SUMMARY
+         * (counts only - derived from existing attendance records,
+         * no change to any pay formula)
+         * ========================================================
+         */
 
         $y =
-            $this->drawPayslipImageMoneySection(
+            $this->drawPayslipImageSectionBar(
                 $image,
                 $left,
                 $right,
                 $y,
-                'EARNINGS',
-                [
-                    'Basic Pay' =>
-                        (float) (
-                            $line['basic_pay'] ?? 0
-                        ),
-                    'Overtime Pay' =>
-                        (float) (
-                            $line['overtime_pay'] ?? 0
-                        ),
-                    'Allowances' =>
-                        (float) (
-                            $line['allowances'] ?? 0
-                        ),
-                ],
-                $section,
-                $white,
+                40,
+                'SALARY SUMMARY',
+                $lightBar,
                 $black,
-                $slate,
-                $border
+                null,
+                null,
+                4
             );
 
-        $y += 28;
+        $summaryCountRows = [
+            'Days Worked' =>
+                (string) $breakdown['days_worked'],
+            'Days Absent / No Work' =>
+                (string) $breakdown['days_absent'],
+            'Holiday Days' =>
+                (string) $breakdown['holiday_days'],
+        ];
 
-        $deductionRows = [
+        $y =
+            $this->drawPayslipImageCountRows(
+                $image,
+                $left,
+                $right,
+                $y,
+                $summaryCountRows,
+                36,
+                $black,
+                $slate,
+                $lightBorder
+            );
+
+        $y += 16;
+
+        /*
+         * ========================================================
+         * BASIC SALARY
+         * (bar shows the existing basic_pay total, unchanged; the
+         * rows below split the existing overtime_pay total into
+         * Regular / Rest Day / Holiday OT using the SAME multiplier
+         * rule already in computeEmployeePay - the three amounts
+         * always sum back to the original overtime_pay value)
+         * ========================================================
+         */
+
+        $basicPay =
+            (float) (
+                $line['basic_pay'] ?? 0
+            );
+
+        $y =
+            $this->drawPayslipImageSectionBar(
+                $image,
+                $left,
+                $right,
+                $y,
+                48,
+                'BASIC SALARY',
+                $lightBar,
+                $black,
+                '₱' . number_format($basicPay, 2),
+                $black
+            );
+
+        $otRows = [
+            'Regular OT (' . number_format($breakdown['regular_ot_hours'], 1) . ' hrs)' =>
+                $breakdown['regular_ot_amount'],
+            'Allowances' =>
+                (float) (
+                    $line['allowances'] ?? 0
+                ),
+        ];
+
+        $y =
+            $this->drawPayslipImageMoneyRows(
+                $image,
+                $left,
+                $right,
+                $y,
+                $otRows,
+                40,
+                $black,
+                $slate,
+                $lightBorder,
+                $white
+            );
+
+        $y += 16;
+
+        $grossPay =
+            (float) (
+                $line['gross_pay'] ?? 0
+            );
+
+        $y =
+            $this->drawPayslipImageSectionBar(
+                $image,
+                $left,
+                $right,
+                $y,
+                52,
+                'GROSS PAY',
+                $lightBar,
+                $black,
+                '₱' . number_format($grossPay, 2),
+                $black
+            );
+
+        $y += 22;
+
+        /*
+         * ========================================================
+         * DEDUCTIONS (two-column grid, matches reference layout)
+         * ========================================================
+         */
+
+        $y =
+            $this->drawPayslipImageSectionBar(
+                $image,
+                $left,
+                $right,
+                $y,
+                44,
+                'DEDUCTIONS',
+                $section,
+                $white,
+                null,
+                null
+            );
+
+        $leftDeductions = [
             'Late Deduction' =>
                 (float) (
                     $line['late_deduction'] ?? 0
                 ),
+        ];
+
+        $rightDeductions = [
             'Undertime Deduction' =>
                 (float) (
                     $line['undertime_deduction'] ?? 0
@@ -1045,7 +1306,7 @@ class SalaryCalculationController
                 $line['absence_deduction'] ?? 0
             ) > 0
         ) {
-            $deductionRows['Absence Deduction'] =
+            $leftDeductions['Absence Deduction'] =
                 (float) (
                     $line['absence_deduction'] ?? 0
                 );
@@ -1056,124 +1317,107 @@ class SalaryCalculationController
                 $line['other_deductions'] ?? 0
             ) > 0
         ) {
-            $deductionRows['Other Deductions'] =
+            $rightDeductions['Other Deductions'] =
                 (float) (
                     $line['other_deductions'] ?? 0
                 );
         }
 
         $y =
-            $this->drawPayslipImageMoneySection(
+            $this->drawPayslipImageTwoColumnRows(
                 $image,
                 $left,
                 $right,
                 $y,
-                'DEDUCTIONS',
-                $deductionRows,
-                $section,
-                $white,
+                $leftDeductions,
+                $rightDeductions,
+                44,
                 $black,
                 $red,
-                $border
+                $lightBorder,
+                $white
             );
 
-        $y += 28;
-
-        $grossPay =
-            (float) (
-                $line['gross_pay'] ?? 0
-            );
+        $y += 10;
 
         $totalDeduction =
             (float) (
                 $line['total_deduction'] ?? 0
             );
 
-        $netPay =
-            (float) (
-                $line['net_pay'] ?? 0
-            );
-
-        $summaryRows = [
-            'Gross Pay' => $grossPay,
-            'Total Deduction' => $totalDeduction,
-        ];
-
-        $summaryHeight =
-            58 * count($summaryRows)
-            + 76;
-
-        imagefilledrectangle(
-            $image,
-            $left,
-            $y,
-            $right,
-            $y + $summaryHeight,
-            $light
-        );
-
-        imagerectangle(
-            $image,
-            $left,
-            $y,
-            $right,
-            $y + $summaryHeight,
-            $border
-        );
-
-        $summaryY = $y + 18;
-
-        foreach ($summaryRows as $label => $value) {
-
-            $this->drawPayslipImageText(
-                $image,
-                $labelX,
-                $summaryY,
-                $label,
-                $black,
-                4
-            );
-
-            $this->drawPayslipImageTextRight(
-                $image,
-                $valueRight,
-                $summaryY,
-                '₱' . number_format($value, 2),
-                $slate,
-                4
-            );
-
-            $summaryY += 58;
-        }
-
-        imagefilledrectangle(
-            $image,
-            $left + 1,
-            $summaryY,
-            $right - 1,
-            $summaryY + 75,
-            $greenBg
-        );
-
         $this->drawPayslipImageText(
             $image,
             $labelX,
-            $summaryY + 20,
-            'Total',
-            $green,
-            5
+            $y,
+            'TOTAL DEDUCTIONS',
+            $black,
+            4
         );
 
         $this->drawPayslipImageTextRight(
             $image,
             $valueRight,
-            $summaryY + 20,
-            '₱' . number_format($netPay, 2),
-            $green,
-            5
+            $y,
+            '(₱' . number_format($totalDeduction, 2) . ')',
+            $red,
+            4
         );
 
-        $y = $summaryY + 105;
+        $y += 40;
+
+        /*
+         * ========================================================
+         * NET PAY
+         * ========================================================
+         */
+
+        $netPay =
+            (float) (
+                $line['net_pay'] ?? 0
+            );
+
+        $y =
+            $this->drawPayslipImageSectionBar(
+                $image,
+                $left,
+                $right,
+                $y,
+                64,
+                'NET PAY',
+                $netBar,
+                $white,
+                '₱' . number_format($netPay, 2),
+                $white,
+                5
+            );
+
+        $y += 40;
+
+        /*
+         * ========================================================
+         * PREPARED BY / SIGNATURE LINE
+         * ========================================================
+         */
+
+        $this->drawPayslipImageText(
+            $image,
+            $left,
+            $y,
+            'PREPARED BY:',
+            $slate,
+            3
+        );
+
+        imagedashedline(
+            $image,
+            $left + 140,
+            $y + 12,
+            $left + 420,
+            $y + 12,
+            $border
+        );
+
+        $y += 40;
 
         $this->drawPayslipImageText(
             $image,
@@ -1182,6 +1426,21 @@ class SalaryCalculationController
             'Generated: ' . date('M j, Y h:i A'),
             $muted,
             2
+        );
+
+        /*
+         * ========================================================
+         * OUTER CARD BORDER
+         * ========================================================
+         */
+
+        imagerectangle(
+            $image,
+            $left - 20,
+            $top,
+            $right + 20,
+            $y + 30,
+            $lightBorder
         );
 
         $filename =
@@ -1213,6 +1472,188 @@ class SalaryCalculationController
         imagedestroy($image);
 
         exit;
+    }
+
+    /**
+     * ============================================================
+     * PAYSLIP ATTENDANCE BREAKDOWN (display-only, additive)
+     * ============================================================
+     *
+     * Computes the Days Worked / Days Absent / Holiday Days counts
+     * and the Regular / Rest Day / Holiday overtime split shown on
+     * the redesigned payslip image. This re-reads the SAME
+     * `employees` and `attendance` tables (via the existing
+     * getEmployeeAttendance() helper) and applies the EXACT SAME
+     * status checks and overtime multipliers already used in
+     * computeEmployeePay() (Present/Late/Half-Day = worked day,
+     * Holiday override, 30-minute OT minimum, 1.00x regular /
+     * 1.30x rest day / 2.00x holiday multiplier).
+     *
+     * This does NOT change computeEmployeePay(), does NOT change
+     * what gets saved to payroll_history, and does NOT change any
+     * peso amount already on the payslip - it only breaks the
+     * existing overtime_pay total down by type for display. The sum
+     * of regular_ot_amount + rest_ot_amount + holiday_ot_amount will
+     * always equal the existing $line['overtime_pay'] value.
+     */
+    private function getPayslipAttendanceBreakdown(
+        PDO $db,
+        array $run,
+        array $line
+    ): array {
+
+        $defaults = [
+            'days_worked' => 0,
+            'days_absent' => 0,
+            'holiday_days' => 0,
+            'regular_ot_hours' => 0.0,
+            'regular_ot_amount' => 0.0,
+            'rest_ot_hours' => 0.0,
+            'rest_ot_amount' => 0.0,
+            'holiday_ot_hours' => 0.0,
+            'holiday_ot_amount' => 0.0,
+        ];
+
+        $employeeId =
+            $line['employee_id']
+            ?? null;
+
+        if (!$employeeId) {
+            return $defaults;
+        }
+
+        $empStmt =
+            $db->prepare(
+                "SELECT id, salary_rate, rest_day
+                 FROM employees
+                 WHERE id = :id
+                 LIMIT 1"
+            );
+
+        $empStmt->execute([
+            'id' => $employeeId,
+        ]);
+
+        $emp = $empStmt->fetch();
+
+        if (!$emp) {
+            return $defaults;
+        }
+
+        $attendanceRows =
+            $this->getEmployeeAttendance(
+                $db,
+                $emp,
+                (string) $run['period_start'],
+                (string) $run['period_end']
+            );
+
+        $dailyRate = (float) ($emp['salary_rate'] ?? 0);
+        $hourlyRate = $dailyRate > 0 ? $dailyRate / 8.0 : 0.0;
+        $restDay = trim((string) ($emp['rest_day'] ?? ''));
+
+        $daysWorked = 0;
+        $daysAbsent = 0;
+        $holidayDays = 0;
+
+        $regularOtMinutes = 0.0;
+        $regularOtAmount = 0.0;
+        $restOtMinutes = 0.0;
+        $restOtAmount = 0.0;
+        $holidayOtMinutes = 0.0;
+        $holidayOtAmount = 0.0;
+
+        foreach ($attendanceRows as $attendance) {
+
+            $status =
+                trim(
+                    (string) ($attendance['attendance_status'] ?? '')
+                );
+
+            $holidayName =
+                trim(
+                    (string) ($attendance['holiday_name'] ?? '')
+                );
+
+            if ($holidayName !== '') {
+                $status = 'Holiday';
+            }
+
+            if (
+                in_array(
+                    $status,
+                    ['Present', 'Late', 'Half-Day'],
+                    true
+                )
+            ) {
+                $daysWorked++;
+            } elseif ($status === 'Holiday') {
+                $holidayDays++;
+            } else {
+                $daysAbsent++;
+            }
+
+            $overtimeMinutes =
+                max(
+                    0,
+                    (float) ($attendance['overtime_minutes'] ?? 0)
+                );
+
+            if ($overtimeMinutes < 30.0) {
+                continue;
+            }
+
+            $multiplier = 1.00;
+
+            $date = $attendance['attendance_date'] ?? null;
+
+            if ($date) {
+
+                $dayName = date('l', strtotime((string) $date));
+
+                if (
+                    $restDay !== '' &&
+                    strcasecmp($restDay, $dayName) === 0
+                ) {
+                    $multiplier = 1.30;
+                }
+            }
+
+            if ($status === 'Holiday') {
+                $multiplier = 2.00;
+            }
+
+            $otPay =
+                round(
+                    ($overtimeMinutes / 60)
+                    * $hourlyRate
+                    * $multiplier,
+                    2
+                );
+
+            if ($multiplier === 2.00) {
+                $holidayOtMinutes += $overtimeMinutes;
+                $holidayOtAmount += $otPay;
+            } elseif ($multiplier === 1.30) {
+                $restOtMinutes += $overtimeMinutes;
+                $restOtAmount += $otPay;
+            } else {
+                $regularOtMinutes += $overtimeMinutes;
+                $regularOtAmount += $otPay;
+            }
+        }
+
+        return [
+            'days_worked' => $daysWorked,
+            'days_absent' => $daysAbsent,
+            'holiday_days' => $holidayDays,
+            'regular_ot_hours' => round($regularOtMinutes / 60, 2),
+            'regular_ot_amount' => round($regularOtAmount, 2),
+            'rest_ot_hours' => round($restOtMinutes / 60, 2),
+            'rest_ot_amount' => round($restOtAmount, 2),
+            'holiday_ot_hours' => round($holidayOtMinutes / 60, 2),
+            'holiday_ot_amount' => round($holidayOtAmount, 2),
+        ];
     }
 
     /**
@@ -1280,46 +1721,79 @@ class SalaryCalculationController
     }
 
     /**
-     * Draw a money section with a dark section heading.
+     * Draw a full-width section bar (used for SALARY SUMMARY /
+     * BASIC SALARY / DEDUCTIONS headers, the GROSS PAY strip, and
+     * the final NET PAY strip). Optionally draws a right-aligned
+     * value on the same bar.
      */
-    private function drawPayslipImageMoneySection(
+    private function drawPayslipImageSectionBar(
         $image,
         int $left,
         int $right,
         int $y,
+        int $height,
         string $title,
-        array $rows,
-        int $sectionColor,
+        int $bgColor,
         int $titleColor,
-        int $labelColor,
-        int $borderColor
+        ?string $rightValue = null,
+        ?int $rightColor = null,
+        int $font = 4
     ): int {
-
-        $headerHeight = 48;
-        $rowHeight = 48;
-        $totalHeight =
-            $headerHeight
-            + ($rowHeight * count($rows));
 
         imagefilledrectangle(
             $image,
             $left,
             $y,
             $right,
-            $y + $headerHeight,
-            $sectionColor
+            $y + $height,
+            $bgColor
         );
+
+        $textY = $y + (int) (($height - 8) / 2) - 4;
 
         $this->drawPayslipImageText(
             $image,
             $left + 24,
-            $y + 14,
+            $textY,
             $title,
             $titleColor,
-            4
+            $font
         );
 
-        $rowY = $y + $headerHeight;
+        if ($rightValue !== null) {
+
+            $this->drawPayslipImageTextRight(
+                $image,
+                $right - 24,
+                $textY,
+                $rightValue,
+                $rightColor ?? $titleColor,
+                $font
+            );
+        }
+
+        return $y + $height;
+    }
+
+    /**
+     * Draw a single-column list of label/amount rows, each in its
+     * own bordered row (used for the Basic Salary OT breakdown and
+     * the Earnings-style rows).
+     */
+    private function drawPayslipImageMoneyRows(
+        $image,
+        int $left,
+        int $right,
+        int $y,
+        array $rows,
+        int $rowHeight,
+        int $labelColor,
+        int $valueColor,
+        int $borderColor,
+        int $bgColor
+    ): int {
+
+        $rowY = $y;
 
         foreach ($rows as $label => $value) {
 
@@ -1329,12 +1803,7 @@ class SalaryCalculationController
                 $rowY,
                 $right,
                 $rowY + $rowHeight,
-                imagecolorallocate(
-                    $image,
-                    255,
-                    255,
-                    255
-                )
+                $bgColor
             );
 
             imagerectangle(
@@ -1349,7 +1818,7 @@ class SalaryCalculationController
             $this->drawPayslipImageText(
                 $image,
                 $left + 24,
-                $rowY + 14,
+                $rowY + 12,
                 $label,
                 $labelColor,
                 4
@@ -1358,16 +1827,175 @@ class SalaryCalculationController
             $this->drawPayslipImageTextRight(
                 $image,
                 $right - 24,
-                $rowY + 14,
+                $rowY + 12,
                 '₱' . number_format((float) $value, 2),
-                $labelColor,
+                $valueColor,
                 4
             );
 
             $rowY += $rowHeight;
         }
 
-        return $y + $totalHeight;
+        return $rowY;
+    }
+
+    /**
+     * Draw a single-column list of label/count rows with a thin
+     * dashed underline instead of a boxed border - used for the
+     * SALARY SUMMARY counts (Days Worked / Days Absent / Holiday
+     * Days), which are not peso amounts.
+     */
+    private function drawPayslipImageCountRows(
+        $image,
+        int $left,
+        int $right,
+        int $y,
+        array $rows,
+        int $rowHeight,
+        int $labelColor,
+        int $valueColor,
+        int $borderColor
+    ): int {
+
+        $rowY = $y;
+
+        foreach ($rows as $label => $value) {
+
+            $this->drawPayslipImageText(
+                $image,
+                $left + 24,
+                $rowY + 8,
+                $label,
+                $labelColor,
+                4
+            );
+
+            $this->drawPayslipImageTextRight(
+                $image,
+                $right - 24,
+                $rowY + 8,
+                (string) $value,
+                $valueColor,
+                4
+            );
+
+            imagedashedline(
+                $image,
+                $left,
+                $rowY + $rowHeight - 2,
+                $right,
+                $rowY + $rowHeight - 2,
+                $borderColor
+            );
+
+            $rowY += $rowHeight;
+        }
+
+        return $rowY;
+    }
+
+    /**
+     * Draw two side-by-side columns of label/amount rows sharing the
+     * same row height (used for the DEDUCTIONS grid, matching the
+     * reference design's left/right deduction columns).
+     */
+    private function drawPayslipImageTwoColumnRows(
+        $image,
+        int $left,
+        int $right,
+        int $y,
+        array $leftRows,
+        array $rightRows,
+        int $rowHeight,
+        int $labelColor,
+        int $valueColor,
+        int $borderColor,
+        int $bgColor
+    ): int {
+
+        $midX = (int) (($left + $right) / 2);
+        $rowCount = max(count($leftRows), count($rightRows));
+
+        $leftLabels = array_keys($leftRows);
+        $leftValues = array_values($leftRows);
+        $rightLabels = array_keys($rightRows);
+        $rightValues = array_values($rightRows);
+
+        imagefilledrectangle(
+            $image,
+            $left,
+            $y,
+            $right,
+            $y + ($rowHeight * $rowCount),
+            $bgColor
+        );
+
+        imagerectangle(
+            $image,
+            $left,
+            $y,
+            $right,
+            $y + ($rowHeight * $rowCount),
+            $borderColor
+        );
+
+        imagedashedline(
+            $image,
+            $midX,
+            $y,
+            $midX,
+            $y + ($rowHeight * $rowCount),
+            $borderColor
+        );
+
+        for ($i = 0; $i < $rowCount; $i++) {
+
+            $rowY = $y + ($i * $rowHeight);
+
+            if (isset($leftLabels[$i])) {
+
+                $this->drawPayslipImageText(
+                    $image,
+                    $left + 24,
+                    $rowY + 14,
+                    $leftLabels[$i],
+                    $labelColor,
+                    4
+                );
+
+                $this->drawPayslipImageTextRight(
+                    $image,
+                    $midX - 24,
+                    $rowY + 14,
+                    '₱' . number_format((float) $leftValues[$i], 2),
+                    $valueColor,
+                    4
+                );
+            }
+
+            if (isset($rightLabels[$i])) {
+
+                $this->drawPayslipImageText(
+                    $image,
+                    $midX + 24,
+                    $rowY + 14,
+                    $rightLabels[$i],
+                    $labelColor,
+                    4
+                );
+
+                $this->drawPayslipImageTextRight(
+                    $image,
+                    $right - 24,
+                    $rowY + 14,
+                    '₱' . number_format((float) $rightValues[$i], 2),
+                    $valueColor,
+                    4
+                );
+            }
+        }
+
+        return $y + ($rowHeight * $rowCount);
     }
 
     /**
@@ -1408,6 +2036,7 @@ class SalaryCalculationController
                 $text
             ) ?? '';
     }
+
 
     /**
      * Filename for the PNG payslip download.
@@ -2090,6 +2719,11 @@ class SalaryCalculationController
         string $periodStart,
         string $periodEnd
     ): array {
+        /*
+         * Match attendance using the same identity fallbacks as the
+         * Attendance module. Imported NGTeco rows may identify an employee
+         * by internal ID, employee code, or NGTeco user ID.
+         */
         $stmt = $db->prepare(
             "SELECT
                 a.*,
@@ -2103,13 +2737,19 @@ class SalaryCalculationController
              LEFT JOIN holidays h
                 ON h.holiday_date = a.attendance_date
                AND h.is_active = 1
-             WHERE a.employee_id = :employee_id
+             WHERE (
+                    CAST(a.employee_id AS CHAR) = CAST(:employee_id AS CHAR)
+                    OR CAST(a.employee_id AS CHAR) = CAST(:employee_code AS CHAR)
+                    OR CAST(a.ngteco_user_id AS CHAR) = CAST(:ngteco_user_id AS CHAR)
+                )
                AND a.attendance_date BETWEEN :period_start AND :period_end
              ORDER BY a.attendance_date ASC"
         );
 
         $stmt->execute([
             'employee_id' => $employee['id'],
+            'employee_code' => $employee['employee_code'] ?? '',
+            'ngteco_user_id' => $employee['ngteco_user_id'] ?? '',
             'period_start' => $periodStart,
             'period_end' => $periodEnd,
         ]);
@@ -2242,6 +2882,79 @@ class SalaryCalculationController
 
         $lines =
             $stmt->fetchAll();
+
+        /*
+         * ========================================================
+         * CALCULATION AVAILABILITY
+         * ========================================================
+         *
+         * Mark an employee as calculable only when at least one
+         * attendance record in this payroll period has BOTH
+         * Time In and Time Out.
+         *
+         * This is used by the view so employees with no completed
+         * attendance remain blank instead of showing ₱0.00.
+         */
+        $attendanceStateStmt =
+            $db->prepare(
+                "SELECT
+                    employee_id,
+                    MAX(
+                        CASE
+                            WHEN time_in IS NOT NULL
+                             AND TRIM(time_in) <> ''
+                             AND time_out IS NOT NULL
+                             AND TRIM(time_out) <> ''
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS has_complete,
+                    MAX(
+                        CASE
+                            WHEN time_in IS NOT NULL
+                             AND TRIM(time_in) <> ''
+                             AND (
+                                 time_out IS NULL
+                                 OR TRIM(time_out) = ''
+                             )
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS has_incomplete
+                 FROM attendance
+                 WHERE attendance_date BETWEEN :period_start AND :period_end
+                   AND employee_id IS NOT NULL
+                 GROUP BY employee_id"
+            );
+
+        $attendanceStateStmt->execute([
+            'period_start' => $run['period_start'],
+            'period_end' => $run['period_end'],
+        ]);
+
+        $attendanceStates = [];
+
+        foreach (
+            $attendanceStateStmt->fetchAll(PDO::FETCH_ASSOC)
+            as $state
+        ) {
+            $attendanceStates[
+                (int) $state['employee_id']
+            ] = $state;
+        }
+
+        foreach ($lines as &$line) {
+            $employeeId = (int) ($line['employee_id'] ?? 0);
+            $state = $attendanceStates[$employeeId] ?? null;
+
+            $line['has_calculable_attendance'] =
+                (bool) ($state['has_complete'] ?? false);
+
+            $line['has_incomplete_attendance'] =
+                (bool) ($state['has_incomplete'] ?? false);
+        }
+
+        unset($line);
 
         $deptStmt =
             $db->prepare(
@@ -2386,7 +3099,83 @@ class SalaryCalculationController
         $line =
             $stmt->fetch();
 
-        return $line ?: null;
+        if (!$line) {
+            return null;
+        }
+
+        /*
+         * ========================================================
+         * CALCULATION AVAILABILITY
+         * ========================================================
+         *
+         * Individual salary details/payslips are considered
+         * calculable only when at least one attendance record in
+         * the payroll period has both Time In and Time Out.
+         */
+        $runStmt =
+            $db->prepare(
+                "SELECT period_start, period_end
+                 FROM payroll_runs
+                 WHERE id = :run_id
+                 LIMIT 1"
+            );
+
+        $runStmt->execute([
+            'run_id' => $runId,
+        ]);
+
+        $runDates = $runStmt->fetch();
+
+        $line['has_calculable_attendance'] = false;
+        $line['has_incomplete_attendance'] = false;
+
+        if ($runDates) {
+            $attendanceStateStmt =
+                $db->prepare(
+                    "SELECT
+                        MAX(
+                            CASE
+                                WHEN time_in IS NOT NULL
+                                 AND TRIM(time_in) <> ''
+                                 AND time_out IS NOT NULL
+                                 AND TRIM(time_out) <> ''
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS has_complete,
+                        MAX(
+                            CASE
+                                WHEN time_in IS NOT NULL
+                                 AND TRIM(time_in) <> ''
+                                 AND (
+                                     time_out IS NULL
+                                     OR TRIM(time_out) = ''
+                                 )
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS has_incomplete
+                     FROM attendance
+                     WHERE employee_id = :employee_id
+                       AND attendance_date BETWEEN :period_start AND :period_end"
+                );
+
+            $attendanceStateStmt->execute([
+                'employee_id' => $line['employee_id'],
+                'period_start' => $runDates['period_start'],
+                'period_end' => $runDates['period_end'],
+            ]);
+
+            $state = $attendanceStateStmt->fetch();
+
+            $line['has_calculable_attendance'] =
+                (bool) ($state['has_complete'] ?? false);
+
+            $line['has_incomplete_attendance'] =
+                (bool) ($state['has_incomplete'] ?? false);
+        }
+
+        return $line;
     }
 
     /**
@@ -2410,8 +3199,7 @@ class SalaryCalculationController
      * 10-19 minutes = ₱50
      * 20-29 minutes = ₱100
      * 30-39 minutes = ₱150
-     * 40-44 minutes = ₱200
-     * 45+ minutes = 1 hour deduction
+     * 40+ minutes = 1 full hourly-rate deduction
      *
      * UNDERTIME
      * ----------------------------
@@ -2429,737 +3217,389 @@ class SalaryCalculationController
         array $emp,
         array $attendanceRows
     ): array {
-
-        /*
-         * ========================================================
-         * DAILY RATE
-         * ========================================================
-         */
-
-        $dailyRate =
-            (float) (
-                $emp['salary_rate'] ?? 0
-            );
-
-        /*
-         * 8 regular hours.
-         */
+        $dailyRate = (float) ($emp['salary_rate'] ?? 0);
         $regularHoursPerDay = 8.0;
+        $hourlyRate = $regularHoursPerDay > 0
+            ? $dailyRate / $regularHoursPerDay
+            : 0.0;
 
         /*
-         * Hourly rate is ONLY used when
-         * 45 minutes or more late/undertime
-         * becomes an automatic 1-hour deduction.
-         */
-        $hourlyRate =
-            $regularHoursPerDay > 0
-                ? $dailyRate /
-                  $regularHoursPerDay
-                : 0;
-
-        /*
-         * ========================================================
-         * RULES
-         * ========================================================
-         */
-
-        /*
-         * Deduction starts at 10 minutes.
-         */
-        $lateBracketMinutes = 10.0;
-
-        /*
-         * Every 10 minutes = ₱50.
-         */
-        $lateBracketAmount = 50.0;
-
-        /*
-         * 45 minutes or more = 1 hour deduction.
-         */
-        $autoHourThreshold = 45.0;
-
-        /*
-         * Overtime minimum remains 30 minutes.
+         * FINAL TIME-DEDUCTION RULE
+         *
+         * Complete hours are charged at the hourly rate.
+         * Remaining minutes:
+         * 0-9   = ₱0
+         * 10-19 = ₱50
+         * 20-29 = ₱100
+         * 30-39 = ₱150
+         * 40-59 = 1 hourly rate
+         *
+         * Example at ₱695/day (₱86.875/hour):
+         * 3h34m = 3 x ₱86.875 + ₱150 = ₱410.63
          */
         $otMinimumMinutes = 30.0;
 
         $otRegularMultiplier = 1.00;
-
         $otRestDayMultiplier = 1.30;
-
         $otHolidayMultiplier = 2.00;
 
-        /*
-         * ========================================================
-         * TOTALS
-         * ========================================================
-         */
-
         $basicPay = 0.0;
-
         $overtimePay = 0.0;
-
         $allowances = 0.0;
-
         $lateDeduction = 0.0;
-
         $undertimeDeduction = 0.0;
-
         $absenceDeduction = 0.0;
-
         $trace = [];
 
-        /*
-         * ========================================================
-         * PROCESS ATTENDANCE
-         * ========================================================
-         */
+        foreach ($attendanceRows as $attendance) {
+            $date = $attendance['attendance_date'] ?? null;
+            if (!$date) {
+                continue;
+            }
 
-        foreach (
-            $attendanceRows as $attendance
-        ) {
-
-            $status =
-                trim(
-                    (string) (
-                        $attendance[
-                            'attendance_status'
-                        ] ?? ''
-                    )
-                );
+            $timeInValue = trim((string) ($attendance['time_in'] ?? ''));
+            $timeOutValue = trim((string) ($attendance['time_out'] ?? ''));
 
             /*
-             * Automatic holiday recognition is date-based.
-             * The LEFT JOIN in getEmployeeAttendance supplies the holiday
-             * details, so salary calculation does not depend on manually
-             * setting attendance_status.
+             * Time In without Time Out is intentionally not calculable yet.
+             * Attendance remains visible and will be calculated after the
+             * next payroll regeneration once Time Out is available.
              */
-            $holidayName =
-                trim(
-                    (string) (
-                        $attendance['holiday_name']
-                        ?? ''
-                    )
-                );
+            if ($timeInValue === '' || $timeOutValue === '') {
+                continue;
+            }
 
-            $holidayType =
-                trim(
-                    (string) (
-                        $attendance['holiday_type']
-                        ?? ''
-                    )
-                );
+            $timeInTs = $this->parseAttendanceTimestamp($date, $timeInValue);
+            $timeOutTs = $this->parseAttendanceTimestamp($date, $timeOutValue);
+
+            if ($timeInTs === null || $timeOutTs === null) {
+                continue;
+            }
+
+            $scheduleInValue = trim((string) ($emp['schedule_time_in'] ?? ''));
+            $scheduleOutValue = trim((string) ($emp['schedule_time_out'] ?? ''));
+
+            $scheduleInTs = null;
+            $scheduleOutTs = null;
+
+            if ($scheduleInValue !== '') {
+                $parsed = strtotime((string) $date . ' ' . $scheduleInValue);
+                if ($parsed !== false) {
+                    $scheduleInTs = $parsed;
+                }
+            }
+
+            if ($scheduleOutValue !== '') {
+                $parsed = strtotime((string) $date . ' ' . $scheduleOutValue);
+                if ($parsed !== false) {
+                    $scheduleOutTs = $parsed;
+                }
+            }
+
+            /* Support an overnight schedule without hardcoding a shift. */
+            if ($scheduleInTs !== null && $scheduleOutTs !== null && $scheduleOutTs <= $scheduleInTs) {
+                $scheduleOutTs += 86400;
+            }
+
+            /* If the actual Time Out crossed midnight, move it to the next day. */
+            if ($scheduleInTs !== null && $scheduleOutTs !== null && $timeOutTs < $timeInTs) {
+                $timeOutTs += 86400;
+            }
+
+            $status = trim((string) ($attendance['attendance_status'] ?? ''));
+            $holidayName = trim((string) ($attendance['holiday_name'] ?? ''));
+            $holidayType = trim((string) ($attendance['holiday_type'] ?? ''));
 
             if ($holidayName !== '') {
                 $status = 'Holiday';
             }
 
-            $lateMinutes =
-                max(
-                    0,
-                    (float) (
-                        $attendance[
-                            'late_minutes'
-                        ] ?? 0
-                    )
-                );
+            /*
+             * If a complete attendance record has no stored status, derive
+             * it from the actual Time In / Time Out. This prevents valid
+             * attendance from becoming ₱0.00 just because the imported
+             * status is blank.
+             */
 
-            $undertimeMinutes =
-                max(
-                    0,
-                    (float) (
-                        $attendance[
-                            'undertime_minutes'
-                        ] ?? 0
-                    )
-                );
+            $employeeRestDay = trim((string) ($emp['rest_day'] ?? ''));
+            $dayNameForRules = date('l', strtotime((string) $date));
+            $isRestDay = $employeeRestDay !== ''
+                && strcasecmp($employeeRestDay, $dayNameForRules) === 0;
+            $isHoliday = $holidayName !== '';
 
-            $overtimeMinutes =
-                max(
-                    0,
-                    (float) (
-                        $attendance[
-                            'overtime_minutes'
-                        ] ?? 0
-                    )
-                );
+            /*
+             * AttendanceCalculator::evaluate() has one shared signature
+             * used by both Attendance and Salary Calculation:
+             *
+             * evaluate(
+             *     date,
+             *     timeIn,
+             *     timeOut,
+             *     scheduleTimeIn,
+             *     scheduleTimeOut,
+             *     restDay,
+             *     isHoliday,
+             *     department
+             * )
+             *
+             * IMPORTANT: pass the actual rest-day name, not the boolean
+             * result of the rest-day check. The previous call used the
+             * arguments in the wrong order, which caused Salary Calculation
+             * to calculate a different/invalid attendance result than the
+             * Attendance module.
+             */
+            $metrics = AttendanceCalculator::evaluate(
+                (string) $date,
+                $timeInValue,
+                $timeOutValue,
+                $scheduleInValue !== '' ? $scheduleInValue : null,
+                $scheduleOutValue !== '' ? $scheduleOutValue : null,
+                $employeeRestDay !== '' ? $employeeRestDay : null,
+                $isHoliday,
+                (string) ($emp['department'] ?? '')
+            );
 
-            $date =
-                $attendance[
-                    'attendance_date'
-                ] ?? null;
+            $lateMinutes = (float) ($metrics['late_minutes'] ?? 0);
+            $undertimeMinutes = (float) ($metrics['undertime_minutes'] ?? 0);
+            $overtimeMinutes = (float) ($metrics['overtime_minutes'] ?? 0);
+            $earlyMinutes = 0.0;
+            $lateStayMinutes = 0.0;
 
-            if (!$date) {
-                continue;
+            if ($scheduleInTs !== null && $timeInTs < $scheduleInTs) {
+                $earlyMinutes = round(($scheduleInTs - $timeInTs) / 60, 2);
+            }
+            if ($scheduleOutTs !== null && $timeOutTs > $scheduleOutTs) {
+                $lateStayMinutes = round(($timeOutTs - $scheduleOutTs) / 60, 2);
+            }
+
+            $status = trim((string) ($metrics['attendance_status'] ?? ''));
+            if ($holidayName !== '') {
+                $status = 'Holiday';
             }
 
             $dayEntry = [
-                'date' =>
-                    $date,
-
-                'status' =>
-                    $status,
-
-                'holiday_name' =>
-                    $holidayName !== ''
-                        ? $holidayName
-                        : null,
-
-                'holiday_type' =>
-                    $holidayType !== ''
-                        ? $holidayType
-                        : null,
-
-                'daily_salary' =>
-                    round(
-                        $dailyRate,
-                        2
-                    ),
-
-                'hourly_rate' =>
-                    round(
-                        $hourlyRate,
-                        2
-                    ),
+                'date' => $date,
+                'status' => $status,
+                'holiday_name' => $holidayName !== '' ? $holidayName : null,
+                'holiday_type' => $holidayType !== '' ? $holidayType : null,
+                'time_in' => $timeInValue,
+                'time_out' => $timeOutValue,
+                'schedule_time_in' => $scheduleInValue !== '' ? $scheduleInValue : null,
+                'schedule_time_out' => $scheduleOutValue !== '' ? $scheduleOutValue : null,
+                'daily_salary' => round($dailyRate, 2),
+                'hourly_rate' => round($hourlyRate, 2),
             ];
 
             /*
-             * ====================================================
-             * BASIC PAY
-             * ====================================================
+             * Derive a missing status only after Time In and Time Out are
+             * both valid. Existing explicit statuses are preserved.
              */
+            if ($status === '') {
+                $status = $lateMinutes > 0 ? 'Late' : 'Present';
+                $dayEntry['status'] = $status;
+            }
 
+            /* BASIC PAY */
             $dayBasicPay = 0.0;
 
-            if (
-                in_array(
-                    $status,
-                    [
-                        'Present',
-                        'Late',
-                        'Half-Day'
-                    ],
-                    true
-                )
-            ) {
-
-                if (
-                    $status === 'Half-Day'
-                ) {
-
-                    $dayBasicPay =
-                        round(
-                            $dailyRate / 2,
-                            2
-                        );
-
+            if (in_array($status, ['Present', 'Late', 'Half-Day'], true)) {
+                if ($status === 'Half-Day') {
+                    $dayBasicPay = round($dailyRate / 2, 2);
                 } else {
-
-                    $dayBasicPay =
-                        round(
-                            $dailyRate,
-                            2
-                        );
+                    $dayBasicPay = round($dailyRate, 2);
                 }
             }
 
-            $basicPay +=
-                $dayBasicPay;
+            $basicPay += $dayBasicPay;
 
-            /*
-             * ====================================================
-             * ALLOWANCE
-             * ====================================================
-             */
-
+            /* ALLOWANCE - intentionally unchanged. */
             $dayAllowance = 0.0;
-
-            if (
-                $status === 'Present'
-            ) {
-
-                $dayAllowance =
-                    (float) (
-                        $emp['allowance']
-                        ?? 0
-                    );
+            if ($status === 'Present') {
+                $dayAllowance = (float) ($emp['allowance'] ?? 0);
             }
+            $allowances += $dayAllowance;
 
-            $allowances +=
-                $dayAllowance;
+            /* LATE DEDUCTION */
+            $dayLateDeduction = $this->calculateTimeDeduction(
+                $lateMinutes,
+                $hourlyRate
+            );
+            $lateDeduction += $dayLateDeduction;
 
-            /*
-             * ====================================================
-             * LATE DEDUCTION
-             * ====================================================
-             *
-             * 0-9 minutes:
-             *      ₱0
-             *
-             * 10-19 minutes:
-             *      ₱50
-             *
-             * 20-29 minutes:
-             *      ₱100
-             *
-             * 30-39 minutes:
-             *      ₱150
-             *
-             * 40-44 minutes:
-             *      ₱200
-             *
-             * 45+ minutes:
-             *      1 hour deduction
-             *      = Daily Rate / 8
-             */
+            /* UNDERTIME DEDUCTION */
+            $dayUndertimeDeduction = $this->calculateTimeDeduction(
+                $undertimeMinutes,
+                $hourlyRate
+            );
+            $undertimeDeduction += $dayUndertimeDeduction;
 
-            $dayLateDeduction = 0.0;
-
-            if ($lateMinutes > 0) {
-
-                if (
-                    $lateMinutes >=
-                    $autoHourThreshold
-                ) {
-
-                    /*
-                     * 45 minutes or more
-                     * = automatic 1 hour deduction.
-                     */
-                    $dayLateDeduction =
-                        round(
-                            $hourlyRate,
-                            2
-                        );
-
-                } elseif (
-                    $lateMinutes >=
-                    $lateBracketMinutes
-                ) {
-
-                    /*
-                     * Every 10 minutes = ₱50.
-                     *
-                     * ceil() means:
-                     *
-                     * 10 mins = 1 bracket = ₱50
-                     * 19 mins = 1 bracket = ₱50
-                     * 20 mins = 2 brackets = ₱100
-                     * 29 mins = 2 brackets = ₱100
-                     * 30 mins = 3 brackets = ₱150
-                     * 40 mins = 4 brackets = ₱200
-                     * 44 mins = 4 brackets = ₱200
-                     */
-                    $brackets =
-                        ceil(
-                            $lateMinutes /
-                            $lateBracketMinutes
-                        );
-
-                    $dayLateDeduction =
-                        round(
-                            $brackets *
-                            $lateBracketAmount,
-                            2
-                        );
-                }
-
-                $lateDeduction +=
-                    $dayLateDeduction;
-            }
-
-            /*
-             * ====================================================
-             * UNDERTIME
-             * ====================================================
-             *
-             * Same rule as Late:
-             *
-             * 0-9 minutes  = ₱0
-             * 10-19 minutes = ₱50
-             * 20-29 minutes = ₱100
-             * 30-39 minutes = ₱150
-             * 40-44 minutes = ₱200
-             * 45+ minutes = 1 hour deduction
-             */
-
-            $dayUndertimeDeduction = 0.0;
-
-            if ($undertimeMinutes > 0) {
-
-                if (
-                    $undertimeMinutes >=
-                    $autoHourThreshold
-                ) {
-
-                    /*
-                     * 45 minutes or more
-                     * = automatic 1 hour deduction.
-                     */
-                    $dayUndertimeDeduction =
-                        round(
-                            $hourlyRate,
-                            2
-                        );
-
-                } elseif (
-                    $undertimeMinutes >=
-                    $lateBracketMinutes
-                ) {
-
-                    /*
-                     * Every 10 minutes = ₱50.
-                     */
-                    $brackets =
-                        ceil(
-                            $undertimeMinutes /
-                            $lateBracketMinutes
-                        );
-
-                    $dayUndertimeDeduction =
-                        round(
-                            $brackets *
-                            $lateBracketAmount,
-                            2
-                        );
-                }
-
-                $undertimeDeduction +=
-                    $dayUndertimeDeduction;
-            }
-
-            /*
-             * ====================================================
-             * ABSENCE
-             * ====================================================
-             */
-
+            /* ABSENCE DEDUCTION remains zero under the current rule. */
             $dayAbsenceDeduction = 0.0;
+            $absenceDeduction += $dayAbsenceDeduction;
 
-            $absenceDeduction +=
-                $dayAbsenceDeduction;
-
-            /*
-             * ====================================================
-             * OVERTIME
-             * ====================================================
-             */
-
+            /* OVERTIME */
             $dayOtPay = 0.0;
-
             $multiplier = 0.0;
+            $dayName = date('l', strtotime((string) $date));
+            $employeeRestDay = trim((string) ($emp['rest_day'] ?? ''));
 
-            $dayName =
-                date(
-                    'l',
-                    strtotime($date)
-                );
-
-            if (
-                $overtimeMinutes >=
-                $otMinimumMinutes
-            ) {
-
-                $multiplier =
-                    $otRegularMultiplier;
-
-                /*
-                 * Rest Day
-                 */
-                $employeeRestDay =
-                    trim(
-                        (string) (
-                            $emp['rest_day']
-                            ?? ''
-                        )
-                    );
+            if ($overtimeMinutes >= $otMinimumMinutes) {
+                $multiplier = $otRegularMultiplier;
 
                 if (
                     $employeeRestDay !== '' &&
-                    strcasecmp(
-                        $employeeRestDay,
-                        $dayName
-                    ) === 0
+                    strcasecmp($employeeRestDay, $dayName) === 0
                 ) {
-
-                    $multiplier =
-                        $otRestDayMultiplier;
+                    $multiplier = $otRestDayMultiplier;
                 }
 
-                /*
-                 * Holiday priority.
-                 */
-                if (
-                    $status === 'Holiday'
-                ) {
-
-                    $multiplier =
-                        $otHolidayMultiplier;
+                if ($status === 'Holiday') {
+                    $multiplier = $otHolidayMultiplier;
                 }
 
-                $dayOtPay =
-                    round(
-                        (
-                            $overtimeMinutes /
-                            60
-                        )
-                        *
-                        $hourlyRate
-                        *
-                        $multiplier,
-                        2
-                    );
+                $dayOtPay = round(
+                    ($overtimeMinutes / 60) * $hourlyRate * $multiplier,
+                    2
+                );
 
-                $overtimePay +=
-                    $dayOtPay;
+                $overtimePay += $dayOtPay;
             }
 
-            /*
-             * ====================================================
-             * DAILY TOTALS
-             * ====================================================
-             */
+            $dayGross = round(
+                $dayBasicPay + $dayOtPay + $dayAllowance,
+                2
+            );
 
-            $dayGross =
-                round(
-                    $dayBasicPay
-                    +
-                    $dayOtPay
-                    +
-                    $dayAllowance,
-                    2
-                );
+            /* Total Deduction is display-only: Late + Undertime only. */
+            $dayDeduction = round(
+                $dayLateDeduction + $dayUndertimeDeduction,
+                2
+            );
 
-            $dayDeduction =
-                round(
-                    $dayLateDeduction
-                    +
-                    $dayUndertimeDeduction
-                    +
-                    $dayAbsenceDeduction,
-                    2
-                );
+            $dayNet = round($dayGross - $dayDeduction, 2);
+            if ($dayNet < 0) {
+                $dayNet = 0.0;
+            }
 
-            $dayNet =
-                round(
-                    $dayGross
-                    -
-                    $dayDeduction,
-                    2
-                );
+            $dayEntry['basic_pay'] = $dayBasicPay;
+            $dayEntry['allowance'] = $dayAllowance;
+            $dayEntry['early_minutes'] = $earlyMinutes;
+            $dayEntry['late_stay_minutes'] = $lateStayMinutes;
+            $dayEntry['late_minutes'] = $lateMinutes;
+            $dayEntry['late_deduction'] = $dayLateDeduction;
+            $dayEntry['undertime_minutes'] = $undertimeMinutes;
+            $dayEntry['undertime_deduction'] = $dayUndertimeDeduction;
+            $dayEntry['overtime_minutes'] = $overtimeMinutes;
+            $dayEntry['overtime_multiplier'] = $multiplier;
+            $dayEntry['overtime_pay'] = $dayOtPay;
+            $dayEntry['gross_pay'] = $dayGross;
+            $dayEntry['total_deduction'] = $dayDeduction;
+            $dayEntry['net_pay'] = $dayNet;
 
-            /*
-             * ====================================================
-             * TRACE
-             * ====================================================
-             */
-
-            $dayEntry[
-                'basic_pay'
-            ] =
-                $dayBasicPay;
-
-            $dayEntry[
-                'allowance'
-            ] =
-                $dayAllowance;
-
-            $dayEntry[
-                'late_minutes'
-            ] =
-                $lateMinutes;
-
-            $dayEntry[
-                'late_deduction'
-            ] =
-                $dayLateDeduction;
-
-            $dayEntry[
-                'undertime_minutes'
-            ] =
-                $undertimeMinutes;
-
-            $dayEntry[
-                'undertime_deduction'
-            ] =
-                $dayUndertimeDeduction;
-
-            $dayEntry[
-                'overtime_minutes'
-            ] =
-                $overtimeMinutes;
-
-            $dayEntry[
-                'overtime_multiplier'
-            ] =
-                $multiplier;
-
-            $dayEntry[
-                'overtime_pay'
-            ] =
-                $dayOtPay;
-
-            $dayEntry[
-                'gross_pay'
-            ] =
-                $dayGross;
-
-            $dayEntry[
-                'total_deduction'
-            ] =
-                $dayDeduction;
-
-            $dayEntry[
-                'net_pay'
-            ] =
-                $dayNet;
-
-            $trace[] =
-                $dayEntry;
+            $trace[] = $dayEntry;
         }
 
-        /*
-         * ========================================================
-         * FINAL TOTALS
-         * ========================================================
-         */
+        $grossPay = round(
+            $basicPay + $overtimePay + $allowances,
+            2
+        );
 
-        $grossPay =
-            round(
-                $basicPay
-                +
-                $overtimePay
-                +
-                $allowances,
-                2
-            );
+        /* Final formula: Gross Pay - Late Deduction - Undertime Deduction. */
+        $totalDeduction = round(
+            $lateDeduction + $undertimeDeduction,
+            2
+        );
 
-        $totalDeduction =
-            round(
-                $lateDeduction
-                +
-                $undertimeDeduction
-                +
-                $absenceDeduction,
-                2
-            );
+        $netPay = round(
+            $grossPay - $totalDeduction,
+            2
+        );
 
-        $netPay =
-            round(
-                $grossPay
-                -
-                $totalDeduction,
-                2
-            );
-
-        /*
-         * Never allow negative net pay.
-         */
         if ($netPay < 0) {
             $netPay = 0.0;
         }
 
-        /*
-         * Add overall summary to trace.
-         */
-        $traceSummary = [
-            'days_processed' =>
-                count($attendanceRows),
-
-            'basic_pay' =>
-                round(
-                    $basicPay,
-                    2
-                ),
-
-            'overtime_pay' =>
-                round(
-                    $overtimePay,
-                    2
-                ),
-
-            'allowances' =>
-                round(
-                    $allowances,
-                    2
-                ),
-
-            'late_deduction' =>
-                round(
-                    $lateDeduction,
-                    2
-                ),
-
-            'undertime_deduction' =>
-                round(
-                    $undertimeDeduction,
-                    2
-                ),
-
-            'gross_pay' =>
-                $grossPay,
-
-            'total_deduction' =>
-                $totalDeduction,
-
-            'net_pay' =>
-                $netPay,
-        ];
-
         $trace[] = [
-            'summary' =>
-                $traceSummary
+            'summary' => [
+                'days_processed' => count($trace),
+                'basic_pay' => round($basicPay, 2),
+                'overtime_pay' => round($overtimePay, 2),
+                'allowances' => round($allowances, 2),
+                'late_deduction' => round($lateDeduction, 2),
+                'undertime_deduction' => round($undertimeDeduction, 2),
+                'total_deduction' => $totalDeduction,
+                'gross_pay' => $grossPay,
+                'net_pay' => $netPay,
+            ],
         ];
 
         return [
-            'basic_pay' =>
-                round(
-                    $basicPay,
-                    2
-                ),
-
-            'overtime_pay' =>
-                round(
-                    $overtimePay,
-                    2
-                ),
-
-            'allowances' =>
-                round(
-                    $allowances,
-                    2
-                ),
-
-            'late_deduction' =>
-                round(
-                    $lateDeduction,
-                    2
-                ),
-
-            'undertime_deduction' =>
-                round(
-                    $undertimeDeduction,
-                    2
-                ),
-
-            'absence_deduction' =>
-                round(
-                    $absenceDeduction,
-                    2
-                ),
-
-            'gross_pay' =>
-                $grossPay,
-
-            'total_deduction' =>
-                $totalDeduction,
-
-            'net_pay' =>
-                $netPay,
-
-            'trace' =>
-                $trace,
+            'basic_pay' => round($basicPay, 2),
+            'overtime_pay' => round($overtimePay, 2),
+            'allowances' => round($allowances, 2),
+            'late_deduction' => round($lateDeduction, 2),
+            'undertime_deduction' => round($undertimeDeduction, 2),
+            'absence_deduction' => round($absenceDeduction, 2),
+            'gross_pay' => $grossPay,
+            'total_deduction' => $totalDeduction,
+            'net_pay' => $netPay,
+            'trace' => $trace,
         ];
+    }
+
+    /**
+     * Parse an attendance timestamp whether the database stores a TIME
+     * value or a full DATETIME value.
+     */
+    private function parseAttendanceTimestamp(
+        string $date,
+        string $value
+    ): ?int {
+        $value = trim($value);
+
+        if ($value === '') {
+            return null;
+        }
+
+        $timestamp = strtotime($value);
+
+        if ($timestamp === false) {
+            $timestamp = strtotime($date . ' ' . $value);
+        }
+
+        return $timestamp === false ? null : $timestamp;
+    }
+
+    /**
+     * Apply the cumulative Late / Undertime deduction rule.
+     */
+    private function calculateTimeDeduction(
+        float $minutes,
+        float $hourlyRate
+    ): float {
+        $minutes = max(0.0, $minutes);
+        $hourlyRate = max(0.0, $hourlyRate);
+
+        if ($minutes <= 0 || $hourlyRate <= 0) {
+            return 0.0;
+        }
+
+        $completeHours = (int) floor($minutes / 60);
+        $remainingMinutes = $minutes - ($completeHours * 60);
+
+        $deduction = $completeHours * $hourlyRate;
+
+        if ($remainingMinutes >= 40) {
+            $deduction += $hourlyRate;
+        } elseif ($remainingMinutes >= 30) {
+            $deduction += 150.0;
+        } elseif ($remainingMinutes >= 20) {
+            $deduction += 100.0;
+        } elseif ($remainingMinutes >= 10) {
+            $deduction += 50.0;
+        }
+
+        return round($deduction, 2);
     }
 
     /**

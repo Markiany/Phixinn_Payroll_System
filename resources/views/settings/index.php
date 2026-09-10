@@ -30,6 +30,84 @@
     </div>
 <?php endif; ?>
 
+<div class="bg-white shadow-sm border border-slate-200 rounded-lg overflow-hidden mb-6">
+    <div class="px-5 py-4 border-b border-slate-200">
+        <h2 class="text-base font-semibold text-slate-800">Department Overtime Settings</h2>
+        <p class="text-xs text-slate-500 mt-1">
+            Control whether employees in each department can earn Early / Morning OT.
+        </p>
+    </div>
+
+    <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-500 text-left">
+            <tr>
+                <th class="px-5 py-2 font-medium">Department Name</th>
+                <th class="px-5 py-2 font-medium">Department Code</th>
+                <th class="px-5 py-2 font-medium">Early / Morning OT</th>
+                <th class="px-5 py-2 font-medium text-right">Action</th>
+            </tr>
+        </thead>
+
+        <tbody class="divide-y divide-slate-100">
+            <?php foreach (($departments ?? []) as $dept): ?>
+                <tr>
+                    <form method="POST" action="/settings/departments/<?= (int) $dept['id'] ?>/overtime">
+                        <td class="px-5 py-3 font-medium text-slate-800">
+                            <?= htmlspecialchars($dept['department_name']) ?>
+                            <input
+                                type="hidden"
+                                name="department_name"
+                                value="<?= htmlspecialchars($dept['department_name']) ?>"
+                            >
+                        </td>
+
+                        <td class="px-5 py-3 text-slate-600">
+                            <?= htmlspecialchars($dept['department_code'] ?? '—') ?>
+                            <input
+                                type="hidden"
+                                name="department_code"
+                                value="<?= htmlspecialchars($dept['department_code'] ?? '') ?>"
+                            >
+                        </td>
+
+                        <td class="px-5 py-3">
+                            <label class="inline-flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    name="allow_early_ot"
+                                    value="1"
+                                    class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                    <?= (int) ($dept['allow_early_ot'] ?? 1) === 1 ? 'checked' : '' ?>
+                                >
+                                <span class="text-sm text-slate-700">
+                                    <?= (int) ($dept['allow_early_ot'] ?? 1) === 1 ? 'Allowed' : 'Not Allowed' ?>
+                                </span>
+                            </label>
+                        </td>
+
+                        <td class="px-5 py-3 text-right">
+                            <button
+                                type="submit"
+                                class="text-sm text-slate-600 hover:underline"
+                            >
+                                Save
+                            </button>
+                        </td>
+                    </form>
+                </tr>
+            <?php endforeach; ?>
+
+            <?php if (empty($departments)): ?>
+                <tr>
+                    <td colspan="4" class="px-5 py-6 text-center text-slate-400">
+                        No departments found from the Employees records.
+                    </td>
+                </tr>
+            <?php endif; ?>
+        </tbody>
+    </table>
+</div>
+
 <!-- Users table -->
 <div class="bg-white shadow-sm border border-slate-200 rounded-lg overflow-hidden">
     <table class="w-full text-sm">

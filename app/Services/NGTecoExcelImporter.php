@@ -734,8 +734,10 @@ class NGTecoExcelImporter
             "SELECT
                 id,
                 employee_code,
+                ngteco_user_id,
                 first_name,
                 last_name,
+                department,
                 salary_rate,
                 schedule_time_in,
                 schedule_time_out,
@@ -758,8 +760,10 @@ class NGTecoExcelImporter
             "SELECT
                 id,
                 employee_code,
+                ngteco_user_id,
                 first_name,
                 last_name,
+                department,
                 salary_rate,
                 schedule_time_in,
                 schedule_time_out,
@@ -872,8 +876,7 @@ class NGTecoExcelImporter
 
                 if ($punchCount === 1) {
 
-                    $timeOut =
-                        $timeIn;
+                    $timeOut = null;
 
                 } else {
 
@@ -914,15 +917,29 @@ class NGTecoExcelImporter
             |
             */
 
-            $findExact->execute([
-                'employee_code' =>
-                    $entry['source_employee_id'],
-            ]);
+            $sourceId = trim(
+                (string) ($entry['source_employee_id'] ?? '')
+            );
 
-            $employee =
-                $findExact->fetch(
-                    PDO::FETCH_ASSOC
+            foreach ($employeeRows as $candidate) {
+                $candidateNgteco = trim(
+                    (string) ($candidate['ngteco_user_id'] ?? '')
                 );
+                $candidateCode = trim(
+                    (string) ($candidate['employee_code'] ?? '')
+                );
+
+                if (
+                    $sourceId !== ''
+                    && (
+                        ($candidateNgteco !== '' && strcasecmp($candidateNgteco, $sourceId) === 0)
+                        || ($candidateCode !== '' && strcasecmp($candidateCode, $sourceId) === 0)
+                    )
+                ) {
+                    $employee = $candidate;
+                    break;
+                }
+            }
 
             /*
             |--------------------------------------------------------------------------
@@ -944,7 +961,7 @@ class NGTecoExcelImporter
                 $employee =
                     $this->findEmployeeByNormalizedCode(
                         $employeeRows,
-                        $entry['source_employee_id']
+                        (string) ($entry['source_employee_id'] ?? '')
                     );
             }
 
@@ -1003,7 +1020,7 @@ class NGTecoExcelImporter
                         0,
 
                     'attendance_status' =>
-                        'Half-Day',
+                        null,
                 ];
 
             } else {
@@ -1012,8 +1029,7 @@ class NGTecoExcelImporter
                     empty($timeOut) ||
                     !is_string($timeOut)
                 ) {
-                    $timeOut =
-                        $timeIn;
+                    $timeOut = null;
                 }
 
                 $metrics =
@@ -1040,6 +1056,10 @@ class NGTecoExcelImporter
                         (string) (
                             $employee['rest_day']
                             ?? ''
+                        ),
+                        (string) (
+                            $employee['department']
+                            ?? ''
                         )
                     );
             }
@@ -1056,7 +1076,7 @@ class NGTecoExcelImporter
                 (string) $entry['attendance_date']
             );
 
-            if ($holiday !== null) {
+            if ($holiday !== null && $timeOut !== null) {
                 $metrics['attendance_status'] = 'Holiday';
             }
 
@@ -1574,10 +1594,15 @@ class NGTecoExcelImporter
                 );
 
                 $attendanceStatus =
-                    $row['attendance_status']
-                    ?? 'Present';
+                    array_key_exists('attendance_status', $row)
+                        ? trim((string) $row['attendance_status'])
+                        : null;
 
-                if ($holiday !== null) {
+                if ($attendanceStatus === '') {
+                    $attendanceStatus = null;
+                }
+
+                if ($holiday !== null && $timeOut !== null) {
                     $attendanceStatus = 'Holiday';
                 }
 
@@ -2168,311 +2193,22 @@ class NGTecoExcelImporter
         ?string $timeOut,
         ?string $scheduleIn,
         ?string $scheduleOut,
-        ?string $restDay
+        ?string $restDay,
+        ?string $department = null
     ): array {
+        $isRestDay = trim((string) ($restDay ?? '')) !== ''
+            && strcasecmp(trim((string) $restDay), date('l', strtotime($date))) === 0;
 
-        /*
-        |--------------------------------------------------------------------------
-        | Time In
-        |--------------------------------------------------------------------------
-        */
-
-        $inTs =
-            strtotime(
-                $date .
-                ' ' .
-                $timeIn
-            );
-
-        if ($inTs === false) {
-            return [
-                'worked_minutes' =>
-                    0,
-
-                'regular_minutes' =>
-                    0,
-
-                'late_minutes' =>
-                    0,
-
-                'undertime_minutes' =>
-                    0,
-
-                'overtime_minutes' =>
-                    0,
-
-                'attendance_status' =>
-                    'Half-Day',
-            ];
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Time Out
-        |--------------------------------------------------------------------------
-        */
-
-        $outTs = null;
-
-        if ($timeOut !== null) {
-            $outTs =
-                strtotime(
-                    $date .
-                    ' ' .
-                    $timeOut
-                );
-        }
-
-        // A single punch is represented by the importer as Time In = Time Out.
-        // It must never create overtime. Only a real later Time Out can create
-        // late-stay OT.
-        if ($outTs !== null && $outTs <= $inTs) {
-            $outTs = null;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Worked Minutes
-        |--------------------------------------------------------------------------
-        */
-
-        $worked = 0;
-
-        if ($outTs !== null) {
-            $worked =
-                max(
-                    0,
-                    (int) round(
-                        (
-                            $outTs -
-                            $inTs
-                        ) / 60
-                    )
-                );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | No Schedule
-        |--------------------------------------------------------------------------
-        */
-
-        if (
-            !$scheduleIn ||
-            !$scheduleOut
-        ) {
-            return [
-                'worked_minutes' =>
-                    $worked,
-
-                'regular_minutes' =>
-                    $worked,
-
-                'late_minutes' =>
-                    0,
-
-                'undertime_minutes' =>
-                    0,
-
-                'overtime_minutes' =>
-                    0,
-
-                'attendance_status' =>
-                    $outTs !== null
-                        ? 'Present'
-                        : 'Half-Day',
-            ];
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Schedule
-        |--------------------------------------------------------------------------
-        */
-
-        // Use the employee's configured schedule.
-        // Never hardcode one shift for all employees.
-        $schedIn = strtotime($date . ' ' . $scheduleIn);
-        $schedOut = strtotime($date . ' ' . $scheduleOut);
-
-        if (
-            $schedIn === false ||
-            $schedOut === false
-        ) {
-            return [
-                'worked_minutes' =>
-                    $worked,
-
-                'regular_minutes' =>
-                    $worked,
-
-                'late_minutes' =>
-                    0,
-
-                'undertime_minutes' =>
-                    0,
-
-                'overtime_minutes' =>
-                    0,
-
-                'attendance_status' =>
-                    $outTs !== null
-                        ? 'Present'
-                        : 'Half-Day',
-            ];
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Late
-        |--------------------------------------------------------------------------
-        */
-
-        $late = 0;
-
-        if ($inTs > $schedIn) {
-            $late =
-                (int) round(
-                    (
-                        $inTs -
-                        $schedIn
-                    ) / 60
-                );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Undertime
-        |--------------------------------------------------------------------------
-        */
-
-        $undertime = 0;
-
-        if (
-            $outTs !== null &&
-            $outTs < $schedOut
-        ) {
-            $undertime =
-                (int) round(
-                    (
-                        $schedOut -
-                        $outTs
-                    ) / 60
-                );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Early Arrival
-        |--------------------------------------------------------------------------
-        */
-
-        $early = 0;
-
-        if ($inTs < $schedIn) {
-            $early =
-                (int) round(
-                    (
-                        $schedIn -
-                        $inTs
-                    ) / 60
-                );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Stay After Schedule
-        |--------------------------------------------------------------------------
-        */
-
-        $lateStay = 0;
-
-        if (
-            $outTs !== null &&
-            $outTs > $schedOut
-        ) {
-            $lateStay =
-                (int) round(
-                    (
-                        $outTs -
-                        $schedOut
-                    ) / 60
-                );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Overtime
-        |--------------------------------------------------------------------------
-        |
-        | Less than 30 minutes = no OT.
-        |
-        */
-
-        $overtime = 0;
-
-        if ($early >= 30) {
-            $overtime += $early;
-        }
-
-        if ($lateStay >= 30) {
-            $overtime += $lateStay;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Regular Minutes
-        |--------------------------------------------------------------------------
-        */
-
-        $regular =
-            max(
-                0,
-                $worked -
-                $overtime
-            );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Status
-        |--------------------------------------------------------------------------
-        */
-
-        if ($outTs === null) {
-
-            $status =
-                'Half-Day';
-
-        } elseif ($late > 0) {
-
-            $status =
-                'Late';
-
-        } else {
-
-            $status =
-                'Present';
-        }
-
-        return [
-            'worked_minutes' =>
-                $worked,
-
-            'regular_minutes' =>
-                $regular,
-
-            'late_minutes' =>
-                $late,
-
-            'undertime_minutes' =>
-                $undertime,
-
-            'overtime_minutes' =>
-                $overtime,
-
-            'attendance_status' =>
-                $status,
-        ];
+        return AttendanceCalculator::evaluate(
+            $scheduleIn,
+            $scheduleOut,
+            $date,
+            $timeIn !== '' ? $timeIn : null,
+            $timeOut,
+            $isRestDay,
+            false,
+            $department
+        );
     }
 
     /**
@@ -2577,6 +2313,24 @@ class NGTecoExcelImporter
 
             $previous =
                 $column;
+        }
+
+        // Time In-only attendance needs a real NULL status.
+        // Empty strings are invalid for an ENUM status column in MySQL.
+        $statusColumn = $db->query(
+            "SHOW COLUMNS FROM attendance LIKE 'attendance_status'"
+        )->fetch(PDO::FETCH_ASSOC);
+
+        if (is_array($statusColumn) && !empty($statusColumn['Type'])) {
+            $statusType = (string) $statusColumn['Type'];
+            $nullable = strtoupper((string) ($statusColumn['Null'] ?? 'NO'));
+
+            if ($nullable !== 'YES') {
+                $db->exec(
+                    "ALTER TABLE attendance
+                     MODIFY COLUMN attendance_status {$statusType} NULL DEFAULT NULL"
+                );
+            }
         }
     }
 }

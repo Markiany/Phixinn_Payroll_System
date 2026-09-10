@@ -842,12 +842,18 @@ $importSuccess =
 
     <?php if (!empty($error)): ?>
 
-        <div class="alert alert-error">
-
-            <?= htmlspecialchars(
-                (string) $error
-            ) ?>
-
+        <div
+            id="attendanceErrorNotification"
+            class="attendance-notification attendance-notification-error"
+            role="alert"
+        >
+            <span class="attendance-notification-icon">!</span>
+            <span><?= htmlspecialchars((string) $error) ?></span>
+            <button
+                type="button"
+                class="attendance-notification-close"
+                aria-label="Close"
+            >×</button>
         </div>
 
     <?php endif; ?>
@@ -1398,9 +1404,12 @@ $importSuccess =
                             $record['worked_minutes']
                             ?? 0;
 
+                        $hasAttendance =
+                            $attendanceCount > 0;
+
                         $status =
                             $record['attendance_status']
-                            ?? 'Present';
+                            ?? null;
 
                         $holidayName =
                             $record['holiday_name']
@@ -1411,13 +1420,15 @@ $importSuccess =
                             ?? null;
 
                         $statusClass =
-                            strtolower(
-                                str_replace(
-                                    [' ', '-'],
-                                    '-',
-                                    (string) $status
+                            $status !== null
+                                ? strtolower(
+                                    str_replace(
+                                        [' ', '-'],
+                                        '-',
+                                        (string) $status
+                                    )
                                 )
-                            );
+                                : '';
 
                         ?>
 
@@ -1534,17 +1545,25 @@ $importSuccess =
 
                             <td>
 
-                                <span
-                                    class="status-badge status-<?= htmlspecialchars(
-                                        $statusClass
-                                    ) ?>"
-                                >
+                                <?php if ($hasAttendance && $status !== null): ?>
 
-                                    <?= htmlspecialchars(
-                                        (string) $status
-                                    ) ?>
+                                    <span
+                                        class="status-badge status-<?= htmlspecialchars(
+                                            $statusClass
+                                        ) ?>"
+                                    >
 
-                                </span>
+                                        <?= htmlspecialchars(
+                                            (string) $status
+                                        ) ?>
+
+                                    </span>
+
+                                <?php else: ?>
+
+                                    <span class="text-slate-400">-</span>
+
+                                <?php endif; ?>
 
                             </td>
 
@@ -1651,7 +1670,7 @@ $importSuccess =
                     <tr>
 
                         <td
-                            colspan="9"
+                            colspan="10"
                             class="empty-state"
                         >
                             <?= __('attendance.no_records_short') ?>
@@ -1682,6 +1701,56 @@ $importSuccess =
 | Attendance Page JavaScript
 |--------------------------------------------------------------------------
 */
+
+function showAttendanceNotification(message) {
+    const existing =
+        document.getElementById('attendanceClientNotification');
+
+    if (existing) {
+        existing.remove();
+    }
+
+    const notification =
+        document.createElement('div');
+
+    notification.id =
+        'attendanceClientNotification';
+
+    notification.className =
+        'attendance-notification attendance-notification-error';
+
+    notification.setAttribute(
+        'role',
+        'alert'
+    );
+
+    notification.innerHTML =
+        '<span class="attendance-notification-icon">!</span>' +
+        '<span></span>' +
+        '<button type="button" class="attendance-notification-close" aria-label="Close">×</button>';
+
+    notification.querySelector('span:nth-child(2)').textContent =
+        message;
+
+    notification.querySelector('button').addEventListener(
+        'click',
+        function () {
+            notification.remove();
+        }
+    );
+
+    document.body.appendChild(notification);
+
+    window.setTimeout(
+        function () {
+            if (notification.isConnected) {
+                notification.remove();
+            }
+        },
+        5000
+    );
+}
+
 
 document.addEventListener(
     'DOMContentLoaded',
@@ -1721,6 +1790,37 @@ document.addEventListener(
             document.getElementById(
                 'cancelPreviewBtn'
             );
+
+
+        const serverNotification =
+            document.getElementById(
+                'attendanceErrorNotification'
+            );
+
+        if (serverNotification) {
+            const closeButton =
+                serverNotification.querySelector(
+                    '.attendance-notification-close'
+                );
+
+            if (closeButton) {
+                closeButton.addEventListener(
+                    'click',
+                    function () {
+                        serverNotification.remove();
+                    }
+                );
+            }
+
+            window.setTimeout(
+                function () {
+                    if (serverNotification.isConnected) {
+                        serverNotification.remove();
+                    }
+                },
+                5000
+            );
+        }
 
 
         /*
@@ -1770,8 +1870,8 @@ document.addEventListener(
                         )
                     ) {
 
-                        alert(
-                            'Please select an Excel or CSV file.'
+                        showAttendanceNotification(
+                            'Invalid File Format. Please select a valid NGTeco attendance Excel or CSV file.'
                         );
 
 

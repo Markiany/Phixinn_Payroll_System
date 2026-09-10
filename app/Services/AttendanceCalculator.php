@@ -2,136 +2,225 @@
 
 namespace App\Services;
 
-/**
- * AttendanceCalculator
- * ============================================================
- * Turns a raw NGTeco punch (time-in / time-out) into the fields
- * the rest of the system relies on: attendance_status,
- * worked_minutes, late_minutes, undertime_minutes and
- * overtime_minutes.
- *
- * Used by AttendanceController::sync() right after each day's
- * punches are paired, so every attendance row written to the
- * database already carries a correct status and a correct
- * minute breakdown. Salary Calculation then only has to read
- * these columns - it never re-derives them from raw punches,
- * which keeps the whole pipeline (Attendance -> Salary
- * Calculation -> Excel -> Payslip) consistent.
- * ============================================================
- */
 class AttendanceCalculator
 {
-    /**
-     * @param string|null $scheduleTimeIn  employee's scheduled start, 'HH:MM[:SS]' (e.g. from employees.schedule_time_in), or null if not set
-     * @param string|null $scheduleTimeOut employee's scheduled/expected end, 'HH:MM[:SS]', or null if not set
-     * @param string      $date            'Y-m-d' attendance date
-     * @param string|null $timeIn          actual clock-in as a full 'Y-m-d H:i:s', or null if no punch that day
-     * @param string|null $timeOut         actual clock-out as a full 'Y-m-d H:i:s', or null if only one punch that day
-     * @param bool        $isRestDay       whether $date is this employee's configured rest day
-     * @param bool        $isHoliday       whether $date is in the holiday calendar (Settings)
-     *
-     * @return array{attendance_status:string, worked_minutes:int, late_minutes:int, undertime_minutes:int, overtime_minutes:int}
-     */
+    public const BREAK_ENABLED = true;
+    public const BREAK_START = '12:00:00';
+    public const BREAK_END = '13:00:00';
+
+    // Shared overtime thresholds used by Attendance and Salary Calculation.
+    public const EARLY_OT_MINUTES = 60;
+    public const OT_MINUTES = 30;
+
     public static function evaluate(
-        ?string $scheduleTimeIn,
-        ?string $scheduleTimeOut,
         string $date,
         ?string $timeIn,
         ?string $timeOut,
-        bool $isRestDay,
-        bool $isHoliday
+        ?string $scheduleTimeIn,
+        ?string $scheduleTimeOut,
+        ?string $restDay,
+        bool $isHoliday,
+        ?string $department = null
     ): array {
-        // ------------------------------------------------------
-        // No punch at all that day - nothing to compute, just
-        // classify which kind of "no work" day this is. Salary
-        // Calculation is what decides whether it's paid (a
-        // holiday can still be paid even with no punch).
-        // ------------------------------------------------------
         if (!$timeIn) {
             if ($isHoliday) {
                 return self::result('Holiday');
             }
-
-            if ($isRestDay) {
+            if (self::isRestDay($date, $restDay)) {
                 return self::result('Rest-Day');
             }
-
             return self::result('Absent');
         }
 
-        $workedMinutes = 0;
-        if ($timeOut) {
-            $workedMinutes = max(0, (int) round((strtotime($timeOut) - strtotime($timeIn)) / 60));
+        if (!$timeOut) {
+            return self::result(null);
         }
 
-        // ------------------------------------------------------
-        // No schedule on file for this employee yet - we can
-        // still record the punch, we just cannot tell if it was
-        // late/undertime/OT without a scheduled time to compare
-        // against.
-        // ------------------------------------------------------
+        $actualInTs = self::parseTimestamp($date, $timeIn);
+        $actualOutTs = self::parseTimestamp($date, $timeOut);
+
+        if ($actualInTs === null || $actualOutTs === null) {
+            return self::result(null);
+        }
+
+        if ($actualOutTs <= $actualInTs) {
+            $actualOutTs += 86400;
+        }
+
+        $workedElapsed = max(0.0, ($actualOutTs - $actualInTs) / 60.0);
+
         if (!$scheduleTimeIn || !$scheduleTimeOut) {
-            return self::result($timeOut ? 'Present' : 'Half-Day', $workedMinutes);
+            $breakMinutes = self::breakOverlapMinutes($actualInTs, $actualOutTs, $date);
+            $worked = max(0, $workedElapsed - $breakMinutes);
+            return self::result(
+                'Present',
+                $worked,
+                0.0,
+                0.0,
+                0.0,
+                $breakMinutes
+            );
         }
 
-        $schedInTs  = strtotime($date . ' ' . $scheduleTimeIn);
-        $schedOutTs = strtotime($date . ' ' . $scheduleTimeOut);
-        $actualInTs = strtotime($timeIn);
-        $actualOutTs = $timeOut ? strtotime($timeOut) : null;
+        $schedInTs = self::parseTimestamp($date, $scheduleTimeIn);
+        $schedOutTs = self::parseTimestamp($date, $scheduleTimeOut);
 
-        // ---- Late: actual time-in after scheduled time-in ----
+        if ($schedInTs === null || $schedOutTs === null) {
+            $breakMinutes = self::breakOverlapMinutes($actualInTs, $actualOutTs, $date);
+            return self::result(
+                'Present',
+                max(0.0, $workedElapsed - $breakMinutes),
+                0.0,
+                0.0,
+                0.0,
+                $breakMinutes
+            );
+        }
+
+        if ($schedOutTs <= $schedInTs) {
+            $schedOutTs += 86400;
+        }
+
         $lateMinutes = $actualInTs > $schedInTs
-            ? (int) round(($actualInTs - $schedInTs) / 60)
-            : 0;
+            ? ($actualInTs - $schedInTs) / 60.0
+            : 0.0;
 
-        // ---- Undertime: left before scheduled time-out ----
-        $undertimeMinutes = ($actualOutTs !== null && $actualOutTs < $schedOutTs)
-            ? (int) round(($schedOutTs - $actualOutTs) / 60)
-            : 0;
-
-        // ---- OT source 1: early arrival before scheduled time-in.
-        //      Only counts once the accumulated early time reaches
-        //      the minimum - then the WHOLE amount counts, not just
-        //      the excess over the minimum. ----
         $earlyMinutes = $actualInTs < $schedInTs
-            ? (int) round(($schedInTs - $actualInTs) / 60)
-            : 0;
-        $otFromEarly = $earlyMinutes >= PayrollRules::OVERTIME_MINIMUM_MINUTES ? $earlyMinutes : 0;
+            ? ($schedInTs - $actualInTs) / 60.0
+            : 0.0;
 
-        // ---- OT source 2: staying after scheduled time-out.
-        //      Same all-or-nothing threshold rule. ----
-        $lateStayMinutes = ($actualOutTs !== null && $actualOutTs > $schedOutTs)
-            ? (int) round(($actualOutTs - $schedOutTs) / 60)
-            : 0;
-        $otFromLateStay = $lateStayMinutes >= PayrollRules::OVERTIME_MINIMUM_MINUTES ? $lateStayMinutes : 0;
+        $lateStayMinutes = $actualOutTs > $schedOutTs
+            ? ($actualOutTs - $schedOutTs) / 60.0
+            : 0.0;
 
+        $allowEarlyOT = true;
+
+        if ($department !== null && trim($department) !== '') {
+            $allowEarlyOT = DepartmentOTSettings::isEarlyOTAllowed($department);
+        }
+
+        $otFromEarly = $allowEarlyOT && $earlyMinutes >= self::EARLY_OT_MINUTES
+            ? $earlyMinutes
+            : 0;
+        $otFromLateStay = $lateStayMinutes >= self::OT_MINUTES ? $lateStayMinutes : 0;
         $overtimeMinutes = $otFromEarly + $otFromLateStay;
 
-        // ---- Status ----
-        if (!$timeOut) {
-            $status = 'Half-Day';
+        $breakMinutes = self::breakOverlapMinutes($actualInTs, $actualOutTs, $date);
+        $workedMinutes = max(0, $workedElapsed - $breakMinutes);
+
+        // The break is already excluded from worked time.
+        // Late is a separate shortage, while undertime is the remaining
+        // shortage after accounting for late and qualifying overtime.
+        $regularWorkedMinutes = max(0, $workedMinutes - $overtimeMinutes);
+        $requiredMinutes = 8 * 60;
+        $undertimeMinutes = max(
+            0,
+            $requiredMinutes - $regularWorkedMinutes - $lateMinutes
+        );
+
+        if ($isHoliday) {
+            $status = 'Holiday';
+        } elseif (self::isRestDay($date, $restDay)) {
+            $status = 'Rest-Day';
         } elseif ($lateMinutes > 0) {
             $status = 'Late';
         } else {
             $status = 'Present';
         }
 
-        return self::result($status, $workedMinutes, $lateMinutes, $undertimeMinutes, $overtimeMinutes);
+        return self::result(
+            $status,
+            $workedMinutes,
+            $lateMinutes,
+            $undertimeMinutes,
+            $overtimeMinutes,
+            $breakMinutes,
+            $earlyMinutes,
+            $lateStayMinutes,
+            $regularWorkedMinutes
+        );
+    }
+
+    public static function breakOverlapMinutes(
+        int $startTs,
+        int $endTs,
+        string $date
+    ): float {
+        if (!self::BREAK_ENABLED || $endTs <= $startTs) {
+            return 0;
+        }
+
+        $breakStart = strtotime($date . ' ' . self::BREAK_START);
+        $breakEnd = strtotime($date . ' ' . self::BREAK_END);
+
+        if ($breakStart === false || $breakEnd === false) {
+            return 0;
+        }
+
+        $overlapStart = max($startTs, $breakStart);
+        $overlapEnd = min($endTs, $breakEnd);
+
+        if ($overlapEnd <= $overlapStart) {
+            return 0;
+        }
+
+        return ($overlapEnd - $overlapStart) / 60.0;
+    }
+
+    private static function isRestDay(string $date, ?string $restDay): bool
+    {
+        $restDay = trim((string) $restDay);
+
+        if ($restDay === '') {
+            return false;
+        }
+
+        return strcasecmp($restDay, date('l', strtotime($date))) === 0;
+    }
+
+    private static function parseTimestamp(string $date, string $value): ?int
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        /*
+         * Time-only values must always use the attendance date.
+         * Otherwise strtotime('07:00:00') uses today's server date,
+         * which can completely break late/undertime/OT calculations.
+         */
+        if (preg_match('/^\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[AaPp][Mm])?$/', $value)) {
+            $timestamp = strtotime($date . ' ' . $value);
+            return $timestamp === false ? null : $timestamp;
+        }
+
+        $timestamp = strtotime($value);
+
+        return $timestamp === false ? null : $timestamp;
     }
 
     private static function result(
-        string $status,
-        int $workedMinutes = 0,
-        int $lateMinutes = 0,
-        int $undertimeMinutes = 0,
-        int $overtimeMinutes = 0
+        ?string $status,
+        float $workedMinutes = 0.0,
+        float $lateMinutes = 0.0,
+        float $undertimeMinutes = 0.0,
+        float $overtimeMinutes = 0.0,
+        ?float $breakMinutes = null,
+        float $earlyMinutes = 0.0,
+        float $lateStayMinutes = 0.0,
+        ?float $regularMinutes = null
     ): array {
         return [
             'attendance_status' => $status,
-            'worked_minutes'    => $workedMinutes,
-            'late_minutes'      => $lateMinutes,
+            'worked_minutes' => $workedMinutes,
+            'regular_minutes' => $regularMinutes ?? max(0.0, $workedMinutes - $overtimeMinutes),
+            'late_minutes' => $lateMinutes,
             'undertime_minutes' => $undertimeMinutes,
-            'overtime_minutes'  => $overtimeMinutes,
+            'overtime_minutes' => $overtimeMinutes,
+            'early_minutes' => $earlyMinutes,
+            'late_stay_minutes' => $lateStayMinutes,
+            'break_minutes' => $breakMinutes ?? (self::BREAK_ENABLED ? 60.0 : 0.0),
         ];
     }
 }

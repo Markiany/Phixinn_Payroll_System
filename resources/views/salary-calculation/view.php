@@ -5,15 +5,15 @@
     <div>
         <h1 class="text-2xl font-semibold">
             <?= __('salary.view_title_prefix') ?>
-            <?= htmlspecialchars(date('M j', strtotime($run['period_start']))) ?> -
-            <?= htmlspecialchars(date('M j, Y', strtotime($run['period_end']))) ?>
+            <?= htmlspecialchars(date('M j', strtotime($run['period_start'] ?? 'now'))) ?> -
+            <?= htmlspecialchars(date('M j, Y', strtotime($run['period_end'] ?? 'now'))) ?>
         </h1>
 
         <p class="text-sm text-slate-500 mt-1">
             <?= __('common.status') ?>:
-            <?= htmlspecialchars($run['status']) ?>
+            <?= htmlspecialchars($run['status'] ?? 'Draft') ?>
 
-            <?php if ($department !== ''): ?>
+            <?php if (!empty($department)): ?>
                 &middot;
                 <?= __('salary.department') ?>:
                 <span class="font-medium text-slate-700">
@@ -24,10 +24,9 @@
     </div>
 
     <div class="flex items-center gap-4">
-        <!-- Download Payroll Excel -->
         <div class="flex items-center gap-2">
             <a
-                href="/salary-calculation/<?= (int) $run['id'] ?>/export<?= $department !== '' ? '?department=' . urlencode($department) : '' ?>"
+                href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/export<?= !empty($department) ? '?department=' . urlencode($department) : '' ?>"
                 class="bg-green-700 text-white px-4 py-2 rounded-lg hover:bg-green-800 text-sm"
             >
                 <?= __('salary.download_excel') ?>
@@ -40,9 +39,8 @@
             <?php endif; ?>
         </div>
 
-        <!-- Download All Payslips ZIP -->
         <a
-            href="/salary-calculation/<?= (int) $run['id'] ?>/payslips-zip<?= $department !== '' ? '?department=' . urlencode($department) : '' ?>"
+            href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/payslips-zip<?= !empty($department) ? '?department=' . urlencode($department) : '' ?>"
             class="bg-slate-900 text-white px-4 py-2 rounded-lg hover:bg-slate-700 text-sm"
         >
             <?= __('salary.download_payslips_zip') ?>
@@ -57,10 +55,9 @@
     </div>
 </div>
 
-<!-- Department filter -->
 <form
     method="GET"
-    action="/salary-calculation/<?= (int) $run['id'] ?>"
+    action="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>"
     class="bg-white shadow-sm border border-slate-200 rounded-lg p-4 mb-6 flex flex-wrap items-end gap-4"
 >
     <div>
@@ -76,14 +73,16 @@
                 <?= __('salary.all_departments') ?>
             </option>
 
-            <?php foreach ($departments as $dept): ?>
-                <option
-                    value="<?= htmlspecialchars($dept) ?>"
-                    <?= $dept === $department ? 'selected' : '' ?>
-                >
-                    <?= htmlspecialchars($dept) ?>
-                </option>
-            <?php endforeach; ?>
+            <?php if (!empty($departments) && is_array($departments)): ?>
+                <?php foreach ($departments as $dept): ?>
+                    <option
+                        value="<?= htmlspecialchars($dept) ?>"
+                        <?= ($dept === ($department ?? '')) ? 'selected' : '' ?>
+                    >
+                        <?= htmlspecialchars($dept) ?>
+                    </option>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </select>
     </div>
 
@@ -95,14 +94,13 @@
     </button>
 
     <a
-        href="/salary-calculation/<?= (int) $run['id'] ?>"
+        href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>"
         class="text-sm text-slate-500 hover:underline"
     >
         <?= __('common.reset') ?>
     </a>
 </form>
 
-<!-- Totals summary -->
 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
 
     <div class="bg-white border border-slate-200 rounded-lg p-4">
@@ -111,7 +109,7 @@
         </p>
 
         <p class="text-xl font-semibold mt-1">
-            ₱<?= number_format($totals['basic_pay'], 2) ?>
+            ₱<?= number_format($totals['basic_pay'] ?? 0, 2) ?>
         </p>
     </div>
 
@@ -121,7 +119,7 @@
         </p>
 
         <p class="text-xl font-semibold mt-1">
-            ₱<?= number_format($totals['total_deduction'], 2) ?>
+            ₱<?= number_format($totals['total_deduction'] ?? 0, 2) ?>
         </p>
     </div>
 
@@ -131,13 +129,12 @@
         </p>
 
         <p class="text-xl font-semibold mt-1">
-            <?= count($lines) ?>
+            <?= count($lines ?? []) ?>
         </p>
     </div>
 
 </div>
 
-<!-- Per-employee breakdown -->
 <div class="bg-white shadow-sm border border-slate-200 rounded-lg overflow-hidden">
 
     <div class="overflow-x-auto">
@@ -145,7 +142,6 @@
 
             <thead class="bg-slate-50 text-slate-500 text-left">
                 <tr>
-
                     <th class="px-4 py-2 font-medium">
                         <?= __('common.employee') ?>
                     </th>
@@ -181,133 +177,86 @@
                     <th class="px-4 py-2 font-medium text-right">
                         <?= __('salary.col_payslip') ?>
                     </th>
-
                 </tr>
             </thead>
 
             <tbody class="divide-y divide-slate-100">
 
-                <?php foreach ($lines as $l): ?>
+                <?php if (!empty($lines) && is_array($lines)): ?>
+                    <?php foreach ($lines as $l): ?>
 
-                    <tr class="hover:bg-slate-50">
+                        <?php
+                        $hasCalculableAttendance =
+                            !empty($l['has_calculable_attendance']);
 
-                        <!-- Employee -->
-                        <td class="px-4 py-3 font-medium text-slate-800">
+                        $hasIncompleteAttendance =
+                            !empty($l['has_incomplete_attendance']);
 
-                            <a
-                                href="/salary-calculation/<?= (int) $run['id'] ?>/employee/<?= (int) $l['employee_id'] ?>"
-                                class="text-slate-800 hover:underline"
-                            >
-                                <?= htmlspecialchars($l['employee_name']) ?>
-                            </a>
+                        $money = static function ($value): string {
+                            return '₱' . number_format((float) $value, 2);
+                        };
+                        ?>
 
-                        </td>
+                        <tr class="hover:bg-slate-50">
 
-                        <!-- Department -->
-                        <td class="px-4 py-3 text-slate-600">
-                            <?= htmlspecialchars($l['department'] ?? '-') ?>
-                        </td>
-
-                        <!-- Basic -->
-                        <td class="px-4 py-3 text-right text-slate-600">
-                            ₱<?= number_format((float) $l['basic_pay'], 2) ?>
-                        </td>
-
-                        <!-- OT -->
-                        <td class="px-4 py-3 text-right text-slate-600">
-                            ₱<?= number_format((float) $l['overtime_pay'], 2) ?>
-                        </td>
-
-                        <!-- Allowance -->
-                        <td class="px-4 py-3 text-right text-slate-600">
-                            ₱<?= number_format((float) $l['allowances'], 2) ?>
-                        </td>
-
-                        <!-- Late Deduction -->
-                        <td class="px-4 py-3 text-right text-red-600">
-                            ₱<?= number_format((float) $l['late_deduction'], 2) ?>
-                        </td>
-
-                        <!-- Undertime Deduction -->
-                        <td class="px-4 py-3 text-right text-red-600">
-                            ₱<?= number_format((float) $l['undertime_deduction'], 2) ?>
-                        </td>
-
-                        <!-- Total Deduction -->
-                        <td class="px-4 py-3 text-right text-red-700">
-                            ₱<?= number_format((float) $l['total_deduction'], 2) ?>
-                        </td>
-
-                        <!-- Payslip + Delete Buttons -->
-                        <td class="px-4 py-3 text-right">
-
-                            <div class="flex items-center justify-end gap-2 whitespace-nowrap">
-
-                                <!-- Existing Payslip Download -->
+                            <td class="px-4 py-3 font-medium text-slate-800">
                                 <a
-                                    href="/salary-calculation/<?= (int) $run['id'] ?>/payslip/<?= (int) $l['employee_id'] ?>"
-                                    class="inline-flex items-center justify-center gap-1.5 bg-green-700 text-white px-3 py-1.5 rounded-md hover:bg-green-800 text-xs font-medium whitespace-nowrap min-w-[100px]"
+                                    href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/employee/<?= (int) ($l['employee_id'] ?? 0) ?>"
+                                    class="text-slate-800 hover:underline"
                                 >
-                                    <svg
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        class="w-3.5 h-3.5"
-                                        fill="none"
-                                        viewBox="0 0 24 24"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                    >
-                                        <path
-                                            stroke-linecap="round"
-                                            stroke-linejoin="round"
-                                            d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2z"
-                                        />
-                                    </svg>
-
-                                    <?= __('salary.download') ?>
+                                    <?= htmlspecialchars($l['employee_name'] ?? 'N/A') ?>
                                 </a>
+                            </td>
 
-                                <!-- Payslip Image -->
-                                <a
-                                    href="/salary-calculation/<?= (int) $run['id'] ?>/payslip/<?= (int) $l['employee_id'] ?>/download"
-                                    class="inline-flex items-center justify-center gap-1.5 bg-slate-900 text-white px-3 py-1.5 rounded-md hover:bg-slate-700 text-xs font-medium whitespace-nowrap min-w-[120px]"
-                                >
-                                    <svg
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        class="w-3.5 h-3.5"
-                                        fill="none"
-                                        viewBox="0 0 24 24"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                    >
-                                        <path
-                                            stroke-linecap="round"
-                                            stroke-linejoin="round"
-                                            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-4-7h.01M5 20h14a1 1 0 001-1V5a1 1 0 01-1-1H5a1 1 0 01-1 1v14a1 1 0 001 1z"
-                                        />
-                                    </svg>
+                            <td class="px-4 py-3 text-slate-600">
+                                <?= htmlspecialchars($l['department'] ?? '-') ?>
+                            </td>
 
-                                    <?= __('salary.payslip_image') ?>
-                                </a>
+                            <!-- No Time Out = no salary value yet -->
+                            <td class="px-4 py-3 text-right text-slate-600">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['basic_pay'] ?? 0)
+                                    : '—' ?>
+                            </td>
 
-                                <!-- Delete This Employee's Salary Calculation -->
-                                <?php if (($currentUser['role'] ?? '') === 'admin'): ?>
-                                    <form
-                                        method="POST"
-                                        action="/salary-calculation/<?= (int) $run['id'] ?>/line/<?= (int) $l['id'] ?>/delete"
-                                        class="inline"
-                                        onsubmit="return confirm('Delete salary calculation for <?= htmlspecialchars($l['employee_name'], ENT_QUOTES) ?> from this payroll run? This cannot be undone.');"
-                                    >
-                                        <?php if ($department !== ''): ?>
-                                            <input
-                                                type="hidden"
-                                                name="department"
-                                                value="<?= htmlspecialchars($department) ?>"
-                                            >
-                                        <?php endif; ?>
+                            <td class="px-4 py-3 text-right text-slate-600">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['overtime_pay'] ?? 0)
+                                    : '—' ?>
+                            </td>
 
-                                        <button
-                                            type="submit"
-                                            class="inline-flex items-center justify-center gap-1.5 bg-red-600 text-white px-3 py-1.5 rounded-md hover:bg-red-700 text-xs font-medium whitespace-nowrap min-w-[80px]"
+                            <td class="px-4 py-3 text-right text-slate-600">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['allowances'] ?? 0)
+                                    : '—' ?>
+                            </td>
+
+                            <td class="px-4 py-3 text-right text-red-600">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['late_deduction'] ?? 0)
+                                    : '—' ?>
+                            </td>
+
+                            <td class="px-4 py-3 text-right text-red-600">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['undertime_deduction'] ?? 0)
+                                    : '—' ?>
+                            </td>
+
+                            <td class="px-4 py-3 text-right text-red-700">
+                                <?= $hasCalculableAttendance
+                                    ? $money($l['total_deduction'] ?? 0)
+                                    : '—' ?>
+                            </td>
+
+                            <td class="px-4 py-3 text-right">
+                                <div class="flex items-center justify-end gap-2 whitespace-nowrap">
+
+                                    <?php if ($hasCalculableAttendance): ?>
+
+                                        <a
+                                            href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/payslip/<?= (int) ($l['employee_id'] ?? 0) ?>"
+                                            class="inline-flex items-center justify-center gap-1.5 bg-green-700 text-white px-3 py-1.5 rounded-md hover:bg-green-800 text-xs font-medium whitespace-nowrap min-w-[100px]"
                                         >
                                             <svg
                                                 xmlns="http://www.w3.org/2000/svg"
@@ -320,25 +269,97 @@
                                                 <path
                                                     stroke-linecap="round"
                                                     stroke-linejoin="round"
-                                                    d="M6 7h12m-10 0v10m4-10v10m4-10v10M9 7V4h6v3m-9 0h12l-1 13H7L6 7z"
+                                                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h7l5 5v11a2 2 0 01-2-2z"
                                                 />
                                             </svg>
 
-                                            <?= __('common.delete') ?>
-                                        </button>
-                                    </form>
-                                <?php endif; ?>
+                                            <?= __('salary.download') ?>
+                                        </a>
 
-                            </div>
+                                        <a
+                                            href="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/payslip/<?= (int) ($l['employee_id'] ?? 0) ?>/download"
+                                            class="inline-flex items-center justify-center gap-1.5 bg-slate-900 text-white px-3 py-1.5 rounded-md hover:bg-slate-700 text-xs font-medium whitespace-nowrap min-w-[120px]"
+                                        >
+                                            <svg
+                                                xmlns="http://www.w3.org/2000/svg"
+                                                class="w-3.5 h-3.5"
+                                                fill="none"
+                                                viewBox="0 0 24 24"
+                                                stroke="currentColor"
+                                                stroke-width="2"
+                                            >
+                                                <path
+                                                    stroke-linecap="round"
+                                                    stroke-linejoin="round"
+                                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-4-7h.01M5 20h14a1 1 0 001-1v14a1 1 0 001 1z"
+                                                />
+                                            </svg>
 
-                        </td>
+                                            <?= __('salary.payslip_image') ?>
+                                        </a>
 
-                    </tr>
+                                    <?php elseif ($hasIncompleteAttendance): ?>
 
-                <?php endforeach; ?>
+                                        <span class="text-xs text-amber-600 font-medium">
+                                            Waiting for Time Out
+                                        </span>
+
+                                    <?php else: ?>
+
+                                        <span class="text-xs text-slate-400">
+                                            No completed attendance
+                                        </span>
+
+                                    <?php endif; ?>
+
+                                    <?php if (($currentUser['role'] ?? '') === 'admin'): ?>
+                                        <form
+                                            method="POST"
+                                            action="/salary-calculation/<?= (int) ($run['id'] ?? 0) ?>/line/<?= (int) ($l['id'] ?? 0) ?>/delete"
+                                            class="inline"
+                                            onsubmit="return confirm('Delete salary calculation for <?= htmlspecialchars($l['employee_name'] ?? 'Employee', ENT_QUOTES) ?> from this payroll run? This cannot be undone.');"
+                                        >
+                                            <?php if (!empty($department)): ?>
+                                                <input
+                                                    type="hidden"
+                                                    name="department"
+                                                    value="<?= htmlspecialchars($department) ?>"
+                                                >
+                                            <?php endif; ?>
+
+                                            <button
+                                                type="submit"
+                                                class="inline-flex items-center justify-center gap-1.5 bg-red-600 text-white px-3 py-1.5 rounded-md hover:bg-red-700 text-xs font-medium whitespace-nowrap min-w-[80px]"
+                                            >
+                                                <svg
+                                                    xmlns="http://www.w3.org/2000/svg"
+                                                    class="w-3.5 h-3.5"
+                                                    fill="none"
+                                                    viewBox="0 0 24 24"
+                                                    stroke="currentColor"
+                                                    stroke-width="2"
+                                                >
+                                                    <path
+                                                        stroke-linecap="round"
+                                                        stroke-linejoin="round"
+                                                        d="M6 7h12m-10 0v10m4-10v10m4-10v10M9 7V4h6v3m-9 0h12l-1 13H7L6 7z"
+                                                    />
+                                                </svg>
+
+                                                <?= __('common.delete') ?>
+                                            </button>
+                                        </form>
+                                    <?php endif; ?>
+
+                                </div>
+                            </td>
+
+                        </tr>
+
+                    <?php endforeach; ?>
+                <?php endif; ?>
 
                 <?php if (empty($lines)): ?>
-
                     <tr>
                         <td
                             colspan="9"
@@ -347,7 +368,6 @@
                             <?= __('salary.no_employee_data') ?>
                         </td>
                     </tr>
-
                 <?php endif; ?>
 
             </tbody>

@@ -36,12 +36,28 @@
                     <?= __('auth.password') ?>
                 </label>
 
-                <input
-                    type="password"
-                    name="password"
-                    required
-                    class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-500"
-                >
+                <div class="relative">
+                    <input
+                        id="login-password"
+                        type="password"
+                        name="password"
+                        required
+                        class="w-full border border-slate-300 rounded px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-slate-500"
+                    >
+
+                    <button
+                        type="button"
+                        id="toggle-password"
+                        aria-label="Show password"
+                        title="Show password"
+                        class="absolute inset-y-0 right-0 flex items-center px-3 text-slate-500 hover:text-slate-700"
+                    >
+                        <svg id="eye-icon" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7Z"/>
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
 
             <button
@@ -53,7 +69,6 @@
 
         </form>
 
-        <!-- REGISTER -->
         <div class="mt-6 pt-5 border-t border-slate-200 text-center">
             <p class="text-sm text-slate-500 mb-2">
                 <?= __('auth.no_account') ?>
@@ -69,5 +84,20 @@
 
     </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const input = document.getElementById('login-password');
+    const button = document.getElementById('toggle-password');
+
+    button.addEventListener('click', function () {
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        button.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        button.setAttribute('title', showing ? 'Show password' : 'Hide password');
+        button.innerHTML = '👁';
+    });
+});
+</script>
 
 <?php require __DIR__ . '/../layouts/footer.php'; ?>

@@ -5,6 +5,8 @@ namespace App\Controllers;
 use App\Helpers\Auth;
 use App\Helpers\Database;
 use App\Services\NGTecoExcelImporter;
+use App\Services\DepartmentOTSettings;
+use App\Services\AttendanceCalculator;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
@@ -50,6 +52,36 @@ class AttendanceController
         return $scheduleInTimestamp - $timeInTimestamp;
     }
 
+    /**
+     * Display minute values without changing the underlying calculation.
+     * Exact decimal minutes are kept internally; only the text display
+     * is truncated to whole minutes (no rounding).
+     */
+    private function formatAttendanceMinutes($minutes): string
+    {
+        $minutes = max(0.0, (float) ($minutes ?? 0));
+        $wholeMinutes = (int) floor($minutes);
+
+        if ($wholeMinutes <= 0) {
+            return '0m';
+        }
+
+        $hours = intdiv($wholeMinutes, 60);
+        $remainingMinutes = $wholeMinutes % 60;
+
+        $parts = [];
+
+        if ($hours > 0) {
+            $parts[] = $hours . 'h';
+        }
+
+        if ($remainingMinutes > 0) {
+            $parts[] = $remainingMinutes . 'm';
+        }
+
+        return implode(' ', $parts);
+    }
+
 private function formatAttendanceSeconds($seconds): string
 {
     $seconds = max(0, (int) ($seconds ?? 0));
@@ -70,11 +102,14 @@ private function formatAttendanceSeconds($seconds): string
     return implode(' ', $parts);
 }
 
-private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
-{
-    // Every minute before the employee's scheduled Time In is counted.
-    return max(0, intdiv($earlyOtSeconds, 60));
-}
+    private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
+    {
+        $minutes = max(0, intdiv($earlyOtSeconds, 60));
+
+        return $minutes >= AttendanceCalculator::EARLY_OT_MINUTES
+            ? $minutes
+            : 0;
+    }
 
     /**
      * Attendance list.
@@ -570,20 +605,52 @@ private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
             $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         foreach ($records as &$record) {
-            if (!empty($record['holiday_name'])) {
-                $record['attendance_status'] = 'Holiday';
-            }
+            $metrics = AttendanceCalculator::evaluate(
+                (string) ($record['attendance_date'] ?? ''),
+                $record['time_in'] ?? null,
+                $record['time_out'] ?? null,
+                $employee['schedule_time_in'] ?? null,
+                $employee['schedule_time_out'] ?? null,
+                $employee['rest_day'] ?? null,
+                !empty($record['holiday_name'])
+            );
+
+            // Keep exact calculator values separately.
+            $record['worked_minutes_exact'] = (float) $metrics['worked_minutes'];
+            $record['regular_minutes_exact'] = (float) $metrics['regular_minutes'];
+            $record['late_minutes_exact'] = (float) $metrics['late_minutes'];
+            $record['undertime_minutes_exact'] = (float) $metrics['undertime_minutes'];
+            $record['overtime_minutes_exact'] = (float) $metrics['overtime_minutes'];
+            $record['break_minutes_exact'] = (float) $metrics['break_minutes'];
+
+            // Existing Attendance view consumes integer minute fields.
+            // Truncate for display only; do not round the calculation.
+            $record['worked_minutes'] = (int) floor(max(0.0, (float) $metrics['worked_minutes']));
+            $record['regular_minutes'] = (int) floor(max(0.0, (float) $metrics['regular_minutes']));
+            $record['late_minutes'] = (int) floor(max(0.0, (float) $metrics['late_minutes']));
+            $record['undertime_minutes'] = (int) floor(max(0.0, (float) $metrics['undertime_minutes']));
+            $record['overtime_minutes'] = (int) floor(max(0.0, (float) $metrics['overtime_minutes']));
+            $record['break_minutes'] = (int) floor(max(0.0, (float) $metrics['break_minutes']));
+            $record['attendance_status'] = $metrics['attendance_status'];
+
+            $allowEarlyOT = DepartmentOTSettings::isEarlyOTAllowed(
+                (string) ($employee['department'] ?? '')
+            );
 
             $record['early_overtime_seconds'] =
-                $this->calculateEarlyOvertimeSeconds(
-                    $record['time_in'] ?? null,
-                    $employee['schedule_time_in'] ?? null
-                );
+                $allowEarlyOT
+                    ? $this->calculateEarlyOvertimeSeconds(
+                        $record['time_in'] ?? null,
+                        $employee['schedule_time_in'] ?? null
+                    )
+                    : 0;
 
             $record['counted_early_overtime_minutes'] =
-                $this->calculateCountedEarlyOvertimeMinutes(
-                    $record['early_overtime_seconds']
-                );
+                $allowEarlyOT
+                    ? $this->calculateCountedEarlyOvertimeMinutes(
+                        $record['early_overtime_seconds']
+                    )
+                    : 0;
         }
         unset($record);
 
@@ -782,16 +849,49 @@ private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
             $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         foreach ($records as &$record) {
+            $metrics = AttendanceCalculator::evaluate(
+                (string) ($record['attendance_date'] ?? ''),
+                $record['time_in'] ?? null,
+                $record['time_out'] ?? null,
+                $employee['schedule_time_in'] ?? null,
+                $employee['schedule_time_out'] ?? null,
+                $employee['rest_day'] ?? null,
+                (($record['attendance_status'] ?? '') === 'Holiday')
+            );
+
+            // Keep exact calculator values separately.
+            $record['worked_minutes_exact'] = (float) $metrics['worked_minutes'];
+            $record['late_minutes_exact'] = (float) $metrics['late_minutes'];
+            $record['undertime_minutes_exact'] = (float) $metrics['undertime_minutes'];
+            $record['overtime_minutes_exact'] = (float) $metrics['overtime_minutes'];
+            $record['break_minutes_exact'] = (float) $metrics['break_minutes'];
+
+            // Download/view fields are display values only.
+            $record['worked_minutes'] = (int) floor(max(0.0, (float) $metrics['worked_minutes']));
+            $record['late_minutes'] = (int) floor(max(0.0, (float) $metrics['late_minutes']));
+            $record['undertime_minutes'] = (int) floor(max(0.0, (float) $metrics['undertime_minutes']));
+            $record['overtime_minutes'] = (int) floor(max(0.0, (float) $metrics['overtime_minutes']));
+            $record['break_minutes'] = (int) floor(max(0.0, (float) $metrics['break_minutes']));
+            $record['attendance_status'] = $metrics['attendance_status'];
+
+            $allowEarlyOT = DepartmentOTSettings::isEarlyOTAllowed(
+                (string) ($employee['department'] ?? '')
+            );
+
             $record['early_overtime_seconds'] =
-                $this->calculateEarlyOvertimeSeconds(
-                    $record['time_in'] ?? null,
-                    $employee['schedule_time_in'] ?? null
-                );
+                $allowEarlyOT
+                    ? $this->calculateEarlyOvertimeSeconds(
+                        $record['time_in'] ?? null,
+                        $employee['schedule_time_in'] ?? null
+                    )
+                    : 0;
 
             $record['counted_early_overtime_minutes'] =
-                $this->calculateCountedEarlyOvertimeMinutes(
-                    $record['early_overtime_seconds']
-                );
+                $allowEarlyOT
+                    ? $this->calculateCountedEarlyOvertimeMinutes(
+                        $record['early_overtime_seconds']
+                    )
+                    : 0;
         }
         unset($record);
 
@@ -1584,9 +1684,10 @@ private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
                 )
             );
 
+        // Only NGTeco attendance spreadsheet formats are allowed.
+        // XLS is intentionally NOT supported.
         $allowedExtensions = [
             'xlsx',
-            'xls',
             'csv'
         ];
 
@@ -1601,7 +1702,7 @@ private function calculateCountedEarlyOvertimeMinutes(int $earlyOtSeconds): int
             $_SESSION[
                 'attendance_upload_error'
             ] =
-                'Please upload an XLSX, XLS, or CSV file.';
+                'Please upload an XLSX or CSV file only.';
 
             header(
                 'Location: /attendance'
